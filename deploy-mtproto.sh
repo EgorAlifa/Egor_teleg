@@ -31,7 +31,7 @@
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-PREFERRED_PORT=8080
+PREFERRED_PORT=444
 CONTAINER_NAME="mtproto-proxy"
 MTG_IMAGE="ghcr.io/9seconds/mtg:2"
 FAKE_TLS_DOMAIN="www.google.com"
@@ -42,7 +42,11 @@ MEM_LIMIT=""
 # Candidate ports — ordered by likelihood of being open in a typical firewall.
 # Ports already known to be in use on this VM are excluded:
 #   443 445 446 447 448 8443 (VPN)   2222 24822 (SSH)
-CANDIDATE_PORTS=(8080 1080 3128 9050 4145 2053 2083 2087 8888 10800 5222 1194 8118)
+#
+# Port 444 is first: it sits inside the VPN's bound range (443-448) and is
+# NOT currently bound, so the same cloud firewall rule that opens 443-448
+# almost certainly covers it too.
+CANDIDATE_PORTS=(444 8080 1080 3128 9050 4145 2053 2083 2087 8888 10800 5222 1194 8118)
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -130,7 +134,10 @@ firewall_allowed_ports() {
         done < <(ufw status numbered 2>/dev/null)
     fi
 
-    printf "%s\n" "${ports[@]:-}"
+    # Only print if we actually collected something (avoid blank-line false positive)
+    if [[ ${#ports[@]} -gt 0 ]]; then
+        printf "%s\n" "${ports[@]}"
+    fi
 }
 
 port_in_range() {
@@ -149,7 +156,8 @@ port_in_range() {
 
 FW_PORTS=$(firewall_allowed_ports)
 FW_KNOWN=false
-[[ -n "$FW_PORTS" ]] && FW_KNOWN=true
+# Strip whitespace before checking — avoid blank-line false positive
+[[ -n "$(echo "$FW_PORTS" | tr -d '[:space:]')" ]] && FW_KNOWN=true
 
 is_port_fw_allowed() {
     local port=$1
@@ -229,14 +237,31 @@ if [[ -z "$SECRET" ]]; then
     docker pull --quiet "$MTG_IMAGE"
 
     info "Generating MTProto secret (fake-TLS domain: ${FAKE_TLS_DOMAIN}) ..."
-    SECRET=$(docker run --rm "$MTG_IMAGE" \
-        generate-secret tls "${FAKE_TLS_DOMAIN}" 2>/dev/null)
-    ok "Secret generated."
+
+    # mtg v2 changed its generate-secret CLI across releases.
+    # Try every known syntax in order; use the first that produces output.
+    for gen_args in \
+        "generate-secret tls:${FAKE_TLS_DOMAIN}" \
+        "generate-secret --tls-host ${FAKE_TLS_DOMAIN} tls" \
+        "generate-secret tls ${FAKE_TLS_DOMAIN}" \
+        "generate-secret tls" \
+        "generate-secret"
+    do
+        # shellcheck disable=SC2086
+        SECRET=$(docker run --rm "$MTG_IMAGE" $gen_args 2>/dev/null || true)
+        # A valid secret is a hex string starting with 'ee' (TLS) or 'dd' (simple)
+        if echo "$SECRET" | grep -qE '^[0-9a-f]{32,}$'; then
+            ok "Secret generated using: mtg $gen_args"
+            break
+        fi
+        SECRET=""
+    done
 else
     info "Using provided secret."
 fi
 
-[[ -z "$SECRET" ]] && die "Failed to generate secret. Check Docker / network access."
+[[ -z "$SECRET" ]] && die "Failed to generate secret. Run manually to debug:
+  docker run --rm ${MTG_IMAGE} generate-secret --help"
 
 # =============================================================================
 # REMOVE OLD CONTAINER
