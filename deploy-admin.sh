@@ -30,11 +30,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADMIN_DIR="$SCRIPT_DIR/admin"
 
 # ── defaults ─────────────────────────────────────────────────────────────────
-STATS_URL="http://127.0.0.1:445/stats"
+STATS_URL="http://127.0.0.1:4444/stats"
 PANEL_PORT=8080
-PANEL_HOST="127.0.0.1"   # bind localhost-only; use SSH tunnel or nginx to expose
-ADMIN_USER="admin"
-ADMIN_PASS="${ADMIN_PASS:-}"
+PANEL_HOST="0.0.0.0"     # bind all interfaces — panel is protected by HTTP Basic Auth
+ADMIN_USER="caravanvpn"
+ADMIN_PASS="${ADMIN_PASS:-caravanvpn}"
 PROXY_NAME="MTProto Proxy"
 DATA_DIR="/opt/mtproto-admin"
 POLL_SECS=60
@@ -61,7 +61,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── validate ──────────────────────────────────────────────────────────────────
-[[ -z "$ADMIN_PASS" ]] && die "Admin password is required. Use --pass or set ADMIN_PASS env var."
+[[ -z "$ADMIN_PASS" ]] && die "Admin password is required. Use --pass or set ADMIN_PASS env var."  # should not happen: default is set above
 [[ -d "$ADMIN_DIR"  ]] || die "admin/ directory not found at $ADMIN_DIR"
 
 # ── check dependencies ────────────────────────────────────────────────────────
@@ -126,7 +126,7 @@ echo ""
 echo "══════════════════════════════════════════════════════════════"
 echo "  Admin Panel is running"
 echo "──────────────────────────────────────────────────────────────"
-echo "  Bound    : ${PANEL_HOST}:${PANEL_PORT}  (localhost-only)"
+echo "  Bound    : ${PANEL_HOST}:${PANEL_PORT}"
 echo "  User     : ${ADMIN_USER}"
 echo "  Stats src: ${STATS_URL}"
 echo "  Data dir : ${DATA_DIR}"

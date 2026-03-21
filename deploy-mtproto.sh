@@ -128,11 +128,12 @@ fi
 # =============================================================================
 MTG_CONFIG_DIR="/etc/mtg"
 MTG_CONFIG_FILE="${MTG_CONFIG_DIR}/config.toml"
+STATS_PORT=4444   # fixed port; avoids collision with nginx which owns 443-448
 mkdir -p "$MTG_CONFIG_DIR"
 cat > "$MTG_CONFIG_FILE" <<TOML
-secret    = "${SECRET}"
-bind-to   = "0.0.0.0:${PROXY_PORT}"
-stats-bind = "127.0.0.1:$((PROXY_PORT + 1))"
+secret     = "${SECRET}"
+bind-to    = "0.0.0.0:${PROXY_PORT}"
+stats-bind = "127.0.0.1:${STATS_PORT}"
 TOML
 chmod 600 "$MTG_CONFIG_FILE"
 ok "Config written to ${MTG_CONFIG_FILE}"
@@ -182,7 +183,6 @@ HOST_IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null \
        || curl -s --max-time 5 https://api.ipify.org 2>/dev/null \
        || hostname -I | awk '{print $1}')
 
-STATS_PORT=$((PROXY_PORT + 1))
 SHARE_LINK="https://t.me/proxy?server=${HOST_IP}&port=${PROXY_PORT}&secret=${SECRET}"
 DEEP_LINK="tg://proxy?server=${HOST_IP}&port=${PROXY_PORT}&secret=${SECRET}"
 
