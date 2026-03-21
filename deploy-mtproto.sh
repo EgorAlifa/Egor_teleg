@@ -239,10 +239,10 @@ if [[ -z "$SECRET" ]]; then
     info "Generating MTProto secret (fake-TLS domain: ${FAKE_TLS_DOMAIN}) ..."
 
     # mtg v2 syntax: generate-secret <hostname>
-    SECRET=$(docker run --rm "$MTG_IMAGE" generate-secret "${FAKE_TLS_DOMAIN}" 2>/dev/null || true)
-    if ! echo "$SECRET" | grep -qE '^[0-9a-f]{32,}$'; then
-        SECRET=""
-    fi
+    # Use --hex for predictable output; fall back without it if unsupported.
+    SECRET=$(docker run --rm "$MTG_IMAGE" generate-secret --hex "${FAKE_TLS_DOMAIN}" 2>/dev/null || true)
+    [[ -z "$SECRET" ]] && \
+        SECRET=$(docker run --rm "$MTG_IMAGE" generate-secret "${FAKE_TLS_DOMAIN}" 2>/dev/null || true)
 else
     info "Using provided secret."
 fi
