@@ -30,16 +30,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADMIN_DIR="$SCRIPT_DIR/admin"
 
 # ── defaults ─────────────────────────────────────────────────────────────────
-STATS_URL="http://127.0.0.1:445/stats"
+STATS_URL="http://127.0.0.1:4444/stats"
 PANEL_PORT=8080
-PANEL_HOST="127.0.0.1"   # bind localhost-only; use SSH tunnel or nginx to expose
-ADMIN_USER="admin"
-ADMIN_PASS="${ADMIN_PASS:-}"
+PANEL_HOST="0.0.0.0"     # bind all interfaces — panel is protected by HTTP Basic Auth
+ADMIN_USER="caravanvpn"
+ADMIN_PASS="${ADMIN_PASS:-caravanvpn}"
 PROXY_NAME="MTProto Proxy"
 DATA_DIR="/opt/mtproto-admin"
 POLL_SECS=60
 CONTAINER_NAME="mtproto-admin"
 IMAGE_NAME="mtproto-admin:latest"
+MTG_CONTAINER="mtproto-proxy"
 SSH_PORT=2222            # server SSH port (for tunnel instructions)
 
 # ── arg parsing ───────────────────────────────────────────────────────────────
@@ -53,13 +54,14 @@ while [[ $# -gt 0 ]]; do
     --name)       PROXY_NAME="$2";  shift 2 ;;
     --data)       DATA_DIR="$2";    shift 2 ;;
     --poll)       POLL_SECS="$2";   shift 2 ;;
-    --ssh-port)   SSH_PORT="$2";    shift 2 ;;
+    --ssh-port)   SSH_PORT="$2";       shift 2 ;;
+    --mtg)        MTG_CONTAINER="$2"; shift 2 ;;
     *) die "Unknown option: $1" ;;
   esac
 done
 
 # ── validate ──────────────────────────────────────────────────────────────────
-[[ -z "$ADMIN_PASS" ]] && die "Admin password is required. Use --pass or set ADMIN_PASS env var."
+[[ -z "$ADMIN_PASS" ]] && die "Admin password is required. Use --pass or set ADMIN_PASS env var."  # should not happen: default is set above
 [[ -d "$ADMIN_DIR"  ]] || die "admin/ directory not found at $ADMIN_DIR"
 
 # ── check dependencies ────────────────────────────────────────────────────────
@@ -92,15 +94,17 @@ docker run \
     --security-opt no-new-privileges \
     \
     --volume "$DATA_DIR:/data" \
+    --volume /var/run/docker.sock:/var/run/docker.sock:ro \
     \
-    --env "STATS_URL=$STATS_URL"     \
-    --env "PANEL_PORT=$PANEL_PORT"   \
-    --env "PANEL_HOST=$PANEL_HOST"   \
-    --env "ADMIN_USER=$ADMIN_USER"   \
-    --env "ADMIN_PASS=$ADMIN_PASS"   \
-    --env "PROXY_NAME=$PROXY_NAME"   \
-    --env "POLL_SECS=$POLL_SECS"     \
-    --env "DB_PATH=/data/stats.db"   \
+    --env "STATS_URL=$STATS_URL"           \
+    --env "PANEL_PORT=$PANEL_PORT"         \
+    --env "PANEL_HOST=$PANEL_HOST"         \
+    --env "ADMIN_USER=$ADMIN_USER"         \
+    --env "ADMIN_PASS=$ADMIN_PASS"         \
+    --env "PROXY_NAME=$PROXY_NAME"         \
+    --env "POLL_SECS=$POLL_SECS"           \
+    --env "DB_PATH=/data/stats.db"         \
+    --env "MTG_CONTAINER=$MTG_CONTAINER"   \
     \
     "$IMAGE_NAME" >/dev/null
 
@@ -122,7 +126,7 @@ echo ""
 echo "══════════════════════════════════════════════════════════════"
 echo "  Admin Panel is running"
 echo "──────────────────────────────────────────────────────────────"
-echo "  Bound    : ${PANEL_HOST}:${PANEL_PORT}  (localhost-only)"
+echo "  Bound    : ${PANEL_HOST}:${PANEL_PORT}"
 echo "  User     : ${ADMIN_USER}"
 echo "  Stats src: ${STATS_URL}"
 echo "  Data dir : ${DATA_DIR}"
