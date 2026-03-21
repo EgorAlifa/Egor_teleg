@@ -5,6 +5,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+echo -e "\033[1;34m[0/2]\033[0m Pulling latest code ..."
+git -C "$SCRIPT_DIR" checkout main
+git -C "$SCRIPT_DIR" pull origin main
+
+echo ""
 echo -e "\033[1;34m[1/2]\033[0m Deploying MTProto proxy ..."
 bash "$SCRIPT_DIR/deploy-mtproto.sh" "$@"
 
