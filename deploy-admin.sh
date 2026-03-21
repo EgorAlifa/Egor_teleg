@@ -9,7 +9,7 @@
 #   ./deploy-admin.sh [OPTIONS]
 #
 # Options:
-#   --stats-url URL   mtg stats endpoint  (default: http://127.0.0.1:445/stats)
+#   --stats-url URL   mtg stats endpoint  (default: http://127.0.0.1:4444/)
 #   --port PORT       panel listen port   (default: 8080)
 #   --user USER       admin username      (default: admin)
 #   --pass PASS       admin password      (REQUIRED or set ADMIN_PASS env var)
@@ -30,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADMIN_DIR="$SCRIPT_DIR/admin"
 
 # ── defaults ─────────────────────────────────────────────────────────────────
-STATS_URL="http://127.0.0.1:4444/stats"
+STATS_URL="http://127.0.0.1:4444/"
 PANEL_PORT=8080
 PANEL_HOST="0.0.0.0"     # bind all interfaces — panel is protected by HTTP Basic Auth
 ADMIN_USER="caravanvpn"

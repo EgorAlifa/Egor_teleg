@@ -135,6 +135,7 @@ secret  = "${SECRET}"
 bind-to = "0.0.0.0:${PROXY_PORT}"
 
 [stats.prometheus]
+enabled = true
 bind-to = "127.0.0.1:${STATS_PORT}"
 TOML
 chmod 600 "$MTG_CONFIG_FILE"

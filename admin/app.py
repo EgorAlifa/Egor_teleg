@@ -2,7 +2,6 @@
 """MTProto Proxy Admin Panel — polls mtg /stats, stores history, serves dashboard."""
 
 import os
-import json
 import re
 import sqlite3
 import time
@@ -17,7 +16,7 @@ from flask import Flask, render_template, jsonify, request, Response
 # ---------------------------------------------------------------------------
 # Config (override via env vars)
 # ---------------------------------------------------------------------------
-STATS_URL      = os.getenv("STATS_URL",      "http://127.0.0.1:445/stats")
+STATS_URL      = os.getenv("STATS_URL",      "http://127.0.0.1:4444/")
 POLL_SECS      = int(os.getenv("POLL_SECS",  "60"))
 DB_PATH        = os.getenv("DB_PATH",        "/data/stats.db")
 PANEL_PORT     = int(os.getenv("PANEL_PORT", "8080"))
@@ -71,19 +70,50 @@ def init_db():
 # Stats polling
 # ---------------------------------------------------------------------------
 
-def _extract(data: dict) -> dict:
-    """Normalise mtg v2 JSON into flat numbers."""
-    conns   = data.get("connections", {})
-    traffic = data.get("traffic", {})
-    alltime = conns.get("all_time", {})
-    total   = sum(alltime.values()) if isinstance(alltime, dict) else 0
+def _parse_prometheus(text: str) -> dict:
+    """Parse Prometheus text exposition format into {metric_name: [(labels, value)]}."""
+    result = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(
+            r'^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+'
+            r'([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|NaN|[+-]Inf)',
+            line,
+        )
+        if not m:
+            continue
+        name, labels_str, value_str = m.group(1), m.group(2) or "", m.group(3)
+        try:
+            value = float(value_str)
+        except ValueError:
+            continue
+        labels = {lm.group(1): lm.group(2)
+                  for lm in re.finditer(r'(\w+)="([^"]*)"', labels_str)}
+        result.setdefault(name, []).append((labels, value))
+    return result
 
+
+def _extract(metrics: dict) -> dict:
+    """Map mtg v2 Prometheus metrics to flat numbers stored in the DB.
+
+    mtg v2 metric names (prefix "mtg"):
+      mtg_client_connections           gauge  label: ip_family
+      mtg_telegram_traffic_total       counter labels: telegram_ip, dc, direction
+        direction values: "from_client" (upload) / "to_client" (download)
+    """
+    active = sum(v for _, v in metrics.get("mtg_client_connections", []))
+    traffic_in  = sum(v for l, v in metrics.get("mtg_telegram_traffic_total", [])
+                      if l.get("direction") == "from_client")
+    traffic_out = sum(v for l, v in metrics.get("mtg_telegram_traffic_total", [])
+                      if l.get("direction") == "to_client")
     return {
-        "active_conns":  int(conns.get("active", 0)),
-        "total_conns":   int(total),
-        "traffic_in":    int(traffic.get("ingress", 0)),
-        "traffic_out":   int(traffic.get("egress",  0)),
-        "crashes":       int(data.get("crashes", 0)),
+        "active_conns": int(active),
+        "total_conns":  0,   # not exposed by mtg v2 Prometheus
+        "traffic_in":   int(traffic_in),
+        "traffic_out":  int(traffic_out),
+        "crashes":      0,
     }
 
 
@@ -91,12 +121,12 @@ def poll_once():
     try:
         resp = requests.get(STATS_URL, timeout=5)
         resp.raise_for_status()
-        data = resp.json()
+        metrics = _parse_prometheus(resp.text)
     except Exception as exc:
         app.logger.warning("stats fetch failed: %s", exc)
         return
 
-    flat = _extract(data)
+    flat = _extract(metrics)
     now  = int(time.time())
 
     with get_db() as conn:
@@ -106,10 +136,10 @@ def poll_once():
                VALUES (?,?,?,?,?,?,?)""",
             (now, flat["active_conns"], flat["total_conns"],
              flat["traffic_in"], flat["traffic_out"], flat["crashes"],
-             json.dumps(data)),
+             resp.text[:4096]),
         )
         conn.commit()
-    app.logger.info("snapshot saved: active=%d total=%d", flat["active_conns"], flat["total_conns"])
+    app.logger.info("snapshot saved: active=%d", flat["active_conns"])
 
 
 def poll_loop():
