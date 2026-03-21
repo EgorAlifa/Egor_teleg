@@ -259,6 +259,22 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
 fi
 
 # =============================================================================
+# WRITE CONFIG FILE
+# mtg v2 requires a TOML config file; it does not accept CLI arguments for
+# the secret or bind address.
+# =============================================================================
+MTG_CONFIG_DIR="/etc/mtg"
+MTG_CONFIG_FILE="${MTG_CONFIG_DIR}/config.toml"
+mkdir -p "$MTG_CONFIG_DIR"
+cat > "$MTG_CONFIG_FILE" <<TOML
+secret    = "${SECRET}"
+bind-to   = "0.0.0.0:${PROXY_PORT}"
+stats-bind = "127.0.0.1:$((PROXY_PORT + 1))"
+TOML
+chmod 600 "$MTG_CONFIG_FILE"
+ok "Config written to ${MTG_CONFIG_FILE}"
+
+# =============================================================================
 # START CONTAINER
 # High-load tuning:
 #   --ulimit nofile  — allow hundreds of thousands of open file descriptors
@@ -283,11 +299,10 @@ docker run \
     --cap-drop ALL \
     --security-opt no-new-privileges \
     \
+    --volume "${MTG_CONFIG_FILE}:/config.toml:ro" \
+    \
     "$MTG_IMAGE" \
-    run \
-    "${SECRET}" \
-    --bind "0.0.0.0:${PROXY_PORT}" \
-    --stats-bind "127.0.0.1:$((PROXY_PORT + 1))" \
+    run /config.toml \
     > /dev/null
 
 # =============================================================================
