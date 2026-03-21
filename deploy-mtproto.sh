@@ -262,8 +262,9 @@ fi
 # START CONTAINER
 # High-load tuning:
 #   --ulimit nofile  — allow hundreds of thousands of open file descriptors
-#   --sysctl         — increase kernel connection backlog and local port range
 #   --network host   — bypass Docker NAT; bind directly on the host interface
+# Note: --sysctl flags are not allowed with --network host (host-namespace
+# sysctls must be set on the host itself, not via Docker).
 # =============================================================================
 info "Starting MTProto proxy container ..."
 docker run \
@@ -278,9 +279,6 @@ docker run \
     --network host \
     \
     --ulimit nofile=1048576:1048576 \
-    --sysctl net.ipv4.ip_local_port_range="1024 65535" \
-    --sysctl net.core.somaxconn=65535 \
-    --sysctl net.ipv4.tcp_tw_reuse=1 \
     \
     --cap-drop ALL \
     --security-opt no-new-privileges \
