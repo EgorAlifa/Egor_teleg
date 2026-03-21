@@ -1,8 +1,13 @@
-# SOCKS5 Proxy for Telegram (Docker / Dante)
+# Telegram Proxy — MTProto (high-load) + SOCKS5 (Docker)
 
-A lightweight SOCKS5 proxy that routes traffic through your existing commercial
-VPN. Designed to be deployed alongside other running containers without
-interference, and capped at **≤ 50 % of host CPU and RAM**.
+Two proxy modes — pick the one that fits your use case:
+
+| Mode | Script | Best for |
+|------|--------|----------|
+| **MTProto** (recommended) | `deploy-mtproto.sh` | Large number of users, public proxy, high concurrency |
+| **SOCKS5** | `deploy.sh` | Personal use, small groups, clients that don't support MTProto |
+
+Both scripts auto-detect open firewall ports and cap resource use at **≤ 50 % CPU / RAM**.
 
 ---
 
@@ -10,48 +15,56 @@ interference, and capped at **≤ 50 % of host CPU and RAM**.
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | Builds the Dante SOCKS5 image on Debian slim |
-| `dante.conf` | Dante configuration (tuned for Telegram long-lived connections) |
-| `entrypoint.sh` | Detects VPN interface at runtime, patches config, starts daemon |
-| `deploy.sh` | One-shot deployment script with auto resource limiting |
+| `deploy-mtproto.sh` | **High-load MTProto proxy** using mtg v2 (recommended) |
+| `deploy.sh` | SOCKS5 proxy using Dante |
+| `Dockerfile` | Dante image (used by `deploy.sh`) |
+| `dante.conf` | Dante configuration |
+| `entrypoint.sh` | VPN-interface detection for SOCKS5 container |
 
 ---
 
-## Quick start
+## MTProto — quick start (recommended for many users)
 
 ```bash
-# 1. Clone / copy files to the server
 git clone <repo-url> && cd <repo-dir>
+chmod +x deploy-mtproto.sh
 
-# 2. Make deploy script executable
-chmod +x deploy.sh entrypoint.sh
-
-# 3. Deploy (defaults: port 1080, 50 % CPU/RAM)
-./deploy.sh
-
-# 4. Optional — custom port or credentials
-./deploy.sh --port 1080 --user myuser --pass s3cr3t
+# Deploy — auto-selects a free open port, generates secret
+./deploy-mtproto.sh
 ```
 
-The script will:
-1. Auto-detect your CPU count and total RAM, limit the container to **50 %** of each
-2. Build the `socks5-dante` Docker image
-3. Start container `socks5-proxy` with `--network host` so it can see your VPN interface (`tun0`, `ppp0`, `wg0`, …)
-4. Print the proxy endpoint and a quick test command
+After deploy the script prints:
+
+```
+SECRET : ee4a1b2c3d...           ← the "key" — share this with users
+LINK   : https://t.me/proxy?server=185.113.223.34&port=8080&secret=ee...
+```
+
+Options:
+```bash
+./deploy-mtproto.sh --port 8080 --domain www.cloudflare.com
+./deploy-mtproto.sh --secret ee<existing-secret>   # reuse saved secret
+```
 
 ---
 
-## Connecting Telegram
+## SOCKS5 — quick start (personal / small groups)
 
-In **Telegram Desktop** (or mobile):
+```bash
+chmod +x deploy.sh entrypoint.sh
+
+./deploy.sh                                    # defaults: port 1080
+./deploy.sh --port 1080 --user alice --pass s3cr3t
+```
+
+### Connecting Telegram to SOCKS5
 
 ```
 Settings → Privacy & Security → Proxy → Add Proxy
   Type : SOCKS5
-  Host : 185.113.223.34   ← your server IP
-  Port : 1080             ← or whichever --port you chose
-  User : (leave blank unless you set --user)
-  Pass : (leave blank unless you set --pass)
+  Host : 185.113.223.34
+  Port : 1080
+  User / Pass : only if you set --user / --pass
 ```
 
 ---
@@ -59,18 +72,16 @@ Settings → Privacy & Security → Proxy → Add Proxy
 ## Useful commands
 
 ```bash
-# View live logs
+# MTProto
+docker logs -f mtproto-proxy
+curl -s http://127.0.0.1:8081/stats | python3 -m json.tool   # live stats
+docker stats mtproto-proxy
+docker rm -f mtproto-proxy
+
+# SOCKS5
 docker logs -f socks5-proxy
-
-# Check resource usage
-docker stats socks5-proxy
-
-# Stop / remove
-docker stop socks5-proxy
-docker rm socks5-proxy
-
-# Quick connectivity test from the server itself
 curl -x socks5h://127.0.0.1:1080 https://ifconfig.me
+docker rm -f socks5-proxy
 ```
 
 ---

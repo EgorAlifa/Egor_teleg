@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+# =============================================================================
+# deploy-mtproto.sh — High-load Telegram MTProto proxy (mtg v2)
+#
+# WHY MTProto instead of SOCKS5?
+#   MTProto is Telegram's native protocol. mtg (Go) handles 50 000+
+#   concurrent connections on a single core, auto-generates an obfuscated
+#   secret, and disguises traffic as HTTPS (fake-TLS) — far more scalable
+#   and reliable than generic SOCKS5 for a shared public proxy.
+#
+# Usage:
+#   chmod +x deploy-mtproto.sh
+#   ./deploy-mtproto.sh [OPTIONS]
+#
+# Options:
+#   --port    <port>    Preferred port (auto-selected if busy/blocked)
+#   --domain  <domain>  Fake-TLS SNI domain     (default: www.google.com)
+#   --secret  <secret>  Reuse an existing secret (default: generate new)
+#   --name    <name>    Container name           (default: mtproto-proxy)
+#   --cpu     <cpus>    CPU cap e.g. 1.0         (default: auto / 50 %)
+#   --mem     <mem>     Memory cap e.g. 512m     (default: auto / 50 %)
+#   --help              Show this help
+#
+# After deploy the script prints:
+#   • The obfuscated SECRET (the "key" users share)
+#   • A one-tap tg:// deep link
+#   • A https://t.me/proxy share link
+#   • Step-by-step manual setup for Telegram Desktop / Mobile
+# =============================================================================
+
+set -euo pipefail
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+PREFERRED_PORT=8080
+CONTAINER_NAME="mtproto-proxy"
+MTG_IMAGE="ghcr.io/9seconds/mtg:2"
+FAKE_TLS_DOMAIN="www.google.com"
+SECRET=""
+CPU_LIMIT=""
+MEM_LIMIT=""
+
+# Candidate ports — ordered by likelihood of being open in a typical firewall.
+# Ports already known to be in use on this VM are excluded:
+#   443 445 446 447 448 8443 (VPN)   2222 24822 (SSH)
+CANDIDATE_PORTS=(8080 1080 3128 9050 4145 2053 2083 2087 8888 10800 5222 1194 8118)
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --port)    PREFERRED_PORT="$2";    shift 2 ;;
+        --domain)  FAKE_TLS_DOMAIN="$2";   shift 2 ;;
+        --secret)  SECRET="$2";            shift 2 ;;
+        --name)    CONTAINER_NAME="$2";    shift 2 ;;
+        --cpu)     CPU_LIMIT="$2";         shift 2 ;;
+        --mem)     MEM_LIMIT="$2";         shift 2 ;;
+        --help)
+            sed -n '/^# Usage/,/^# ====/p' "$0" | head -n -1
+            exit 0 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+info()  { echo -e "\033[1;34m[INFO]\033[0m  $*"; }
+ok()    { echo -e "\033[1;32m[OK]\033[0m    $*"; }
+warn()  { echo -e "\033[1;33m[WARN]\033[0m  $*"; }
+die()   { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
+
+# ── Pre-flight ────────────────────────────────────────────────────────────────
+command -v docker >/dev/null 2>&1 || die "Docker is not installed or not in PATH."
+
+# =============================================================================
+# PORT SELECTION
+# 1. Collect ports already bound on the host (ss → /proc/net/tcp fallback)
+# 2. Read firewall ACCEPT rules (iptables / nftables / ufw)
+# 3. Pick the first candidate that is free AND firewall-allowed
+# =============================================================================
+
+# ── Bound ports ───────────────────────────────────────────────────────────────
+used_ports() {
+    if command -v ss &>/dev/null; then
+        ss -tlnH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -un
+    else
+        for f in /proc/net/tcp /proc/net/tcp6; do
+            [[ -f "$f" ]] || continue
+            awk 'NR>1 && $4=="0A" {print $2}' "$f" \
+              | awk -F: '{printf "%d\n", strtonum("0x"$NF)}'
+        done | sort -un
+    fi
+}
+
+USED_PORTS_LIST=$(used_ports)
+is_port_used() { echo "$USED_PORTS_LIST" | grep -qx "$1"; }
+
+# ── Firewall-allowed ports ────────────────────────────────────────────────────
+firewall_allowed_ports() {
+    local ports=()
+
+    if command -v iptables &>/dev/null && iptables -L INPUT -n 2>/dev/null | grep -q "ACCEPT"; then
+        while IFS= read -r line; do
+            if echo "$line" | grep -qE "ACCEPT.*tcp.*dpt:[0-9]+"; then
+                p=$(echo "$line" | grep -oE "dpt:[0-9]+" | grep -oE "[0-9]+")
+                [[ -n "$p" ]] && ports+=("$p")
+            fi
+            if echo "$line" | grep -qE "ACCEPT.*tcp.*dpts:[0-9]+:[0-9]+"; then
+                range=$(echo "$line" | grep -oE "dpts:[0-9]+:[0-9]+" | grep -oE "[0-9]+:[0-9]+")
+                ports+=("RANGE:${range%%:*}:${range##*:}")
+            fi
+        done < <(iptables -L INPUT -n 2>/dev/null)
+    fi
+
+    if command -v nft &>/dev/null; then
+        while IFS= read -r line; do
+            if echo "$line" | grep -qiE "accept" && echo "$line" | grep -qE "dport"; then
+                p=$(echo "$line" | grep -oE "dport [0-9]+" | grep -oE "[0-9]+")
+                [[ -n "$p" ]] && ports+=("$p")
+                for p in $(echo "$line" | grep -oE "\{[^}]+\}" | tr -d '{},' | tr ' ' '\n' | grep -E '^[0-9]+$'); do
+                    ports+=("$p")
+                done
+            fi
+        done < <(nft list ruleset 2>/dev/null)
+    fi
+
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "^Status: active"; then
+        while IFS= read -r line; do
+            if echo "$line" | grep -qiE "ALLOW"; then
+                p=$(echo "$line" | grep -oE "^[0-9]+(/(tcp|udp))?" | grep -oE "^[0-9]+")
+                [[ -n "$p" ]] && ports+=("$p")
+            fi
+        done < <(ufw status numbered 2>/dev/null)
+    fi
+
+    printf "%s\n" "${ports[@]:-}"
+}
+
+port_in_range() {
+    local port=$1
+    local ranges
+    ranges=$(echo "$FW_PORTS" | grep "^RANGE:" || true)
+    [[ -z "$ranges" ]] && return 1
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        lo=$(echo "$entry" | cut -d: -f2)
+        hi=$(echo "$entry" | cut -d: -f3)
+        (( port >= lo && port <= hi )) && return 0
+    done <<< "$ranges"
+    return 1
+}
+
+FW_PORTS=$(firewall_allowed_ports)
+FW_KNOWN=false
+[[ -n "$FW_PORTS" ]] && FW_KNOWN=true
+
+is_port_fw_allowed() {
+    local port=$1
+    $FW_KNOWN || return 0
+    echo "$FW_PORTS" | grep -qx "$port" && return 0
+    port_in_range "$port" && return 0
+    return 1
+}
+
+# ── Select port ───────────────────────────────────────────────────────────────
+ALL_CANDIDATES=("$PREFERRED_PORT")
+for p in "${CANDIDATE_PORTS[@]}"; do
+    [[ "$p" != "$PREFERRED_PORT" ]] && ALL_CANDIDATES+=("$p")
+done
+
+PROXY_PORT=""
+SKIPPED_USED=()
+SKIPPED_FW=()
+
+info "Scanning candidate ports ..."
+for port in "${ALL_CANDIDATES[@]}"; do
+    if is_port_used "$port"; then
+        SKIPPED_USED+=("$port")
+        continue
+    fi
+    if ! is_port_fw_allowed "$port"; then
+        SKIPPED_FW+=("$port")
+        continue
+    fi
+    PROXY_PORT="$port"
+    break
+done
+
+if [[ -z "$PROXY_PORT" ]]; then
+    warn "No confirmed-open port found — picking first free port (firewall status unknown)."
+    for port in "${ALL_CANDIDATES[@]}"; do
+        if ! is_port_used "$port"; then
+            PROXY_PORT="$port"
+            warn "Port ${PROXY_PORT} may be blocked by the firewall — verify manually."
+            break
+        fi
+    done
+    [[ -z "$PROXY_PORT" ]] && die "All candidate ports are in use. Pass --port <free-port>."
+fi
+
+[[ ${#SKIPPED_USED[@]} -gt 0 ]] && info "Skipped (already bound): ${SKIPPED_USED[*]}"
+[[ ${#SKIPPED_FW[@]}   -gt 0 ]] && info "Skipped (not in firewall): ${SKIPPED_FW[*]}"
+! $FW_KNOWN && warn "Run as root for accurate firewall filtering."
+
+ok "Selected port: ${PROXY_PORT}"
+
+# =============================================================================
+# RESOURCE LIMITS (50 % of host)
+# =============================================================================
+if [[ -z "$CPU_LIMIT" ]]; then
+    TOTAL_CPUS=$(nproc)
+    HALF_CPUS=$(echo "$TOTAL_CPUS / 2" | bc -l | xargs printf "%.2f")
+    CPU_LIMIT=$(echo "$HALF_CPUS 0.50" | awk '{print ($1 > $2) ? $1 : $2}')
+    info "Auto CPU limit: ${CPU_LIMIT} vCPUs (50 % of ${TOTAL_CPUS})"
+fi
+
+if [[ -z "$MEM_LIMIT" ]]; then
+    TOTAL_MEM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    HALF_MEM_MB=$(( TOTAL_MEM_KB / 2 / 1024 ))
+    [[ $HALF_MEM_MB -lt 128 ]] && HALF_MEM_MB=128
+    MEM_LIMIT="${HALF_MEM_MB}m"
+    info "Auto memory limit: ${MEM_LIMIT} (50 % of ~$(( TOTAL_MEM_KB / 1024 )) MB)"
+fi
+
+# =============================================================================
+# GENERATE SECRET (if not supplied)
+# The secret is the "key" shared with users. It encodes the fake-TLS domain
+# so Telegram clients know which SNI to use when connecting.
+# =============================================================================
+if [[ -z "$SECRET" ]]; then
+    info "Pulling mtg image: ${MTG_IMAGE} ..."
+    docker pull --quiet "$MTG_IMAGE"
+
+    info "Generating MTProto secret (fake-TLS domain: ${FAKE_TLS_DOMAIN}) ..."
+    SECRET=$(docker run --rm "$MTG_IMAGE" \
+        generate-secret tls "${FAKE_TLS_DOMAIN}" 2>/dev/null)
+    ok "Secret generated."
+else
+    info "Using provided secret."
+fi
+
+[[ -z "$SECRET" ]] && die "Failed to generate secret. Check Docker / network access."
+
+# =============================================================================
+# REMOVE OLD CONTAINER
+# =============================================================================
+if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    info "Removing existing container '${CONTAINER_NAME}' ..."
+    docker rm -f "$CONTAINER_NAME"
+fi
+
+# =============================================================================
+# START CONTAINER
+# High-load tuning:
+#   --ulimit nofile  — allow hundreds of thousands of open file descriptors
+#   --sysctl         — increase kernel connection backlog and local port range
+#   --network host   — bypass Docker NAT; bind directly on the host interface
+# =============================================================================
+info "Starting MTProto proxy container ..."
+docker run \
+    --name "$CONTAINER_NAME" \
+    --restart unless-stopped \
+    --detach \
+    \
+    --cpus "$CPU_LIMIT" \
+    --memory "$MEM_LIMIT" \
+    --memory-swap "$MEM_LIMIT" \
+    \
+    --network host \
+    \
+    --ulimit nofile=1048576:1048576 \
+    --sysctl net.ipv4.ip_local_port_range="1024 65535" \
+    --sysctl net.core.somaxconn=65535 \
+    --sysctl net.ipv4.tcp_tw_reuse=1 \
+    \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
+    \
+    "$MTG_IMAGE" \
+    run \
+    "${SECRET}" \
+    --bind "0.0.0.0:${PROXY_PORT}" \
+    --stats-bind "127.0.0.1:$((PROXY_PORT + 1))" \
+    > /dev/null
+
+# =============================================================================
+# PROXY CONFIG CARD
+# =============================================================================
+sleep 2
+
+if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    die "Container failed to start. Logs: docker logs ${CONTAINER_NAME}"
+fi
+
+HOST_IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null \
+       || curl -s --max-time 5 https://api.ipify.org 2>/dev/null \
+       || hostname -I | awk '{print $1}')
+
+STATS_PORT=$((PROXY_PORT + 1))
+SHARE_LINK="https://t.me/proxy?server=${HOST_IP}&port=${PROXY_PORT}&secret=${SECRET}"
+DEEP_LINK="tg://proxy?server=${HOST_IP}&port=${PROXY_PORT}&secret=${SECRET}"
+
+echo ""
+echo -e "\033[1;32m╔══════════════════════════════════════════════════════════════╗\033[0m"
+echo -e "\033[1;32m║        TELEGRAM MTProto PROXY — READY                        ║\033[0m"
+echo -e "\033[1;32m╚══════════════════════════════════════════════════════════════╝\033[0m"
+echo ""
+echo -e "\033[1m  ── Your proxy secret (share this with users) ──\033[0m"
+echo ""
+echo "  SECRET : ${SECRET}"
+echo ""
+echo -e "\033[1m  ── One-tap connection links ──\033[0m"
+echo ""
+echo "  Share link  (works in browser / chat):"
+echo "  ${SHARE_LINK}"
+echo ""
+echo "  Deep link (paste in Telegram → open directly):"
+echo "  ${DEEP_LINK}"
+echo ""
+echo -e "\033[1m  ── Manual setup in Telegram ──\033[0m"
+echo ""
+echo "  Desktop:  Settings → Privacy & Security → Proxy → Add Proxy"
+echo "  Mobile:   Settings → Data & Storage → Proxy → Add Proxy"
+echo ""
+echo "    Type   : MTProto"
+echo "    Server : ${HOST_IP}"
+echo "    Port   : ${PROXY_PORT}"
+echo "    Secret : ${SECRET}"
+echo ""
+echo -e "\033[1m  ── Server info ──\033[0m"
+echo ""
+echo "  Container  : ${CONTAINER_NAME}"
+echo "  Image      : ${MTG_IMAGE}"
+echo "  CPU cap    : ${CPU_LIMIT} vCPUs"
+echo "  Memory cap : ${MEM_LIMIT}"
+echo "  Fake-TLS   : ${FAKE_TLS_DOMAIN}  (traffic looks like HTTPS)"
+echo "  Stats      : curl http://127.0.0.1:${STATS_PORT}/stats  (on server)"
+echo ""
+echo -e "\033[1m  ── Commands ──\033[0m"
+echo ""
+echo "  Logs       : docker logs -f ${CONTAINER_NAME}"
+echo "  Stats      : curl -s http://127.0.0.1:${STATS_PORT}/stats | python3 -m json.tool"
+echo "  Stop       : docker stop ${CONTAINER_NAME}"
+echo "  Remove     : docker rm -f ${CONTAINER_NAME}"
+echo ""
+echo -e "\033[1;33m  ── SAVE THESE DETAILS — the secret cannot be recovered later ──\033[0m"
+echo ""
+echo "  SECRET : ${SECRET}"
+echo "  LINK   : ${SHARE_LINK}"
+echo ""
+echo -e "\033[1;32m══════════════════════════════════════════════════════════════\033[0m"
