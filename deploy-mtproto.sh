@@ -238,24 +238,11 @@ if [[ -z "$SECRET" ]]; then
 
     info "Generating MTProto secret (fake-TLS domain: ${FAKE_TLS_DOMAIN}) ..."
 
-    # mtg v2 changed its generate-secret CLI across releases.
-    # Try every known syntax in order; use the first that produces output.
-    for gen_args in \
-        "generate-secret tls:${FAKE_TLS_DOMAIN}" \
-        "generate-secret --tls-host ${FAKE_TLS_DOMAIN} tls" \
-        "generate-secret tls ${FAKE_TLS_DOMAIN}" \
-        "generate-secret tls" \
-        "generate-secret"
-    do
-        # shellcheck disable=SC2086
-        SECRET=$(docker run --rm "$MTG_IMAGE" $gen_args 2>/dev/null || true)
-        # A valid secret is a hex string starting with 'ee' (TLS) or 'dd' (simple)
-        if echo "$SECRET" | grep -qE '^[0-9a-f]{32,}$'; then
-            ok "Secret generated using: mtg $gen_args"
-            break
-        fi
+    # mtg v2 syntax: generate-secret <hostname>
+    SECRET=$(docker run --rm "$MTG_IMAGE" generate-secret "${FAKE_TLS_DOMAIN}" 2>/dev/null || true)
+    if ! echo "$SECRET" | grep -qE '^[0-9a-f]{32,}$'; then
         SECRET=""
-    done
+    fi
 else
     info "Using provided secret."
 fi
