@@ -297,6 +297,7 @@ docker run \
     --ulimit nofile=1048576:1048576 \
     \
     --cap-drop ALL \
+    --cap-add  NET_BIND_SERVICE \
     --security-opt no-new-privileges \
     \
     --volume "${MTG_CONFIG_FILE}:/config.toml:ro" \
