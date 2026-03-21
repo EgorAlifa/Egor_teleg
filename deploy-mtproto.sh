@@ -39,15 +39,6 @@ SECRET=""
 CPU_LIMIT=""
 MEM_LIMIT=""
 
-# Candidate ports — ordered by likelihood of being open in a typical firewall.
-# Ports already known to be in use on this VM are excluded:
-#   443 445 446 447 448 8443 (VPN)   2222 24822 (SSH)
-#
-# Port 444 is first: it sits inside the VPN's bound range (443-448) and is
-# NOT currently bound, so the same cloud firewall rule that opens 443-448
-# almost certainly covers it too.
-CANDIDATE_PORTS=(444 8080 1080 3128 9050 4145 2053 2083 2087 8888 10800 5222 1194 8118)
-
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -74,140 +65,12 @@ die()   { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
 command -v docker >/dev/null 2>&1 || die "Docker is not installed or not in PATH."
 
 # =============================================================================
-# PORT SELECTION
-# 1. Collect ports already bound on the host (ss → /proc/net/tcp fallback)
-# 2. Read firewall ACCEPT rules (iptables / nftables / ufw)
-# 3. Pick the first candidate that is free AND firewall-allowed
+# PORT SELECTION — use the preferred port directly.
+# The old container is removed later (before docker run), so the port is free.
+# Pass --port <N> to override.
 # =============================================================================
-
-# ── Bound ports ───────────────────────────────────────────────────────────────
-used_ports() {
-    if command -v ss &>/dev/null; then
-        ss -tlnH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -un
-    else
-        for f in /proc/net/tcp /proc/net/tcp6; do
-            [[ -f "$f" ]] || continue
-            awk 'NR>1 && $4=="0A" {print $2}' "$f" \
-              | awk -F: '{printf "%d\n", strtonum("0x"$NF)}'
-        done | sort -un
-    fi
-}
-
-USED_PORTS_LIST=$(used_ports)
-is_port_used() { echo "$USED_PORTS_LIST" | grep -qx "$1"; }
-
-# ── Firewall-allowed ports ────────────────────────────────────────────────────
-firewall_allowed_ports() {
-    local ports=()
-
-    if command -v iptables &>/dev/null && iptables -L INPUT -n 2>/dev/null | grep -q "ACCEPT"; then
-        while IFS= read -r line; do
-            if echo "$line" | grep -qE "ACCEPT.*tcp.*dpt:[0-9]+"; then
-                p=$(echo "$line" | grep -oE "dpt:[0-9]+" | grep -oE "[0-9]+")
-                [[ -n "$p" ]] && ports+=("$p")
-            fi
-            if echo "$line" | grep -qE "ACCEPT.*tcp.*dpts:[0-9]+:[0-9]+"; then
-                range=$(echo "$line" | grep -oE "dpts:[0-9]+:[0-9]+" | grep -oE "[0-9]+:[0-9]+")
-                ports+=("RANGE:${range%%:*}:${range##*:}")
-            fi
-        done < <(iptables -L INPUT -n 2>/dev/null)
-    fi
-
-    if command -v nft &>/dev/null; then
-        while IFS= read -r line; do
-            if echo "$line" | grep -qiE "accept" && echo "$line" | grep -qE "dport"; then
-                p=$(echo "$line" | grep -oE "dport [0-9]+" | grep -oE "[0-9]+")
-                [[ -n "$p" ]] && ports+=("$p")
-                for p in $(echo "$line" | grep -oE "\{[^}]+\}" | tr -d '{},' | tr ' ' '\n' | grep -E '^[0-9]+$'); do
-                    ports+=("$p")
-                done
-            fi
-        done < <(nft list ruleset 2>/dev/null)
-    fi
-
-    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "^Status: active"; then
-        while IFS= read -r line; do
-            if echo "$line" | grep -qiE "ALLOW"; then
-                p=$(echo "$line" | grep -oE "^[0-9]+(/(tcp|udp))?" | grep -oE "^[0-9]+")
-                [[ -n "$p" ]] && ports+=("$p")
-            fi
-        done < <(ufw status numbered 2>/dev/null)
-    fi
-
-    # Only print if we actually collected something (avoid blank-line false positive)
-    if [[ ${#ports[@]} -gt 0 ]]; then
-        printf "%s\n" "${ports[@]}"
-    fi
-}
-
-port_in_range() {
-    local port=$1
-    local ranges
-    ranges=$(echo "$FW_PORTS" | grep "^RANGE:" || true)
-    [[ -z "$ranges" ]] && return 1
-    while IFS= read -r entry; do
-        [[ -z "$entry" ]] && continue
-        lo=$(echo "$entry" | cut -d: -f2)
-        hi=$(echo "$entry" | cut -d: -f3)
-        (( port >= lo && port <= hi )) && return 0
-    done <<< "$ranges"
-    return 1
-}
-
-FW_PORTS=$(firewall_allowed_ports)
-FW_KNOWN=false
-# Strip whitespace before checking — avoid blank-line false positive
-[[ -n "$(echo "$FW_PORTS" | tr -d '[:space:]')" ]] && FW_KNOWN=true
-
-is_port_fw_allowed() {
-    local port=$1
-    $FW_KNOWN || return 0
-    echo "$FW_PORTS" | grep -qx "$port" && return 0
-    port_in_range "$port" && return 0
-    return 1
-}
-
-# ── Select port ───────────────────────────────────────────────────────────────
-ALL_CANDIDATES=("$PREFERRED_PORT")
-for p in "${CANDIDATE_PORTS[@]}"; do
-    [[ "$p" != "$PREFERRED_PORT" ]] && ALL_CANDIDATES+=("$p")
-done
-
-PROXY_PORT=""
-SKIPPED_USED=()
-SKIPPED_FW=()
-
-info "Scanning candidate ports ..."
-for port in "${ALL_CANDIDATES[@]}"; do
-    if is_port_used "$port"; then
-        SKIPPED_USED+=("$port")
-        continue
-    fi
-    if ! is_port_fw_allowed "$port"; then
-        SKIPPED_FW+=("$port")
-        continue
-    fi
-    PROXY_PORT="$port"
-    break
-done
-
-if [[ -z "$PROXY_PORT" ]]; then
-    warn "No confirmed-open port found — picking first free port (firewall status unknown)."
-    for port in "${ALL_CANDIDATES[@]}"; do
-        if ! is_port_used "$port"; then
-            PROXY_PORT="$port"
-            warn "Port ${PROXY_PORT} may be blocked by the firewall — verify manually."
-            break
-        fi
-    done
-    [[ -z "$PROXY_PORT" ]] && die "All candidate ports are in use. Pass --port <free-port>."
-fi
-
-[[ ${#SKIPPED_USED[@]} -gt 0 ]] && info "Skipped (already bound): ${SKIPPED_USED[*]}"
-[[ ${#SKIPPED_FW[@]}   -gt 0 ]] && info "Skipped (not in firewall): ${SKIPPED_FW[*]}"
-! $FW_KNOWN && warn "Run as root for accurate firewall filtering."
-
-ok "Selected port: ${PROXY_PORT}"
+PROXY_PORT="$PREFERRED_PORT"
+ok "Using port: ${PROXY_PORT}"
 
 # =============================================================================
 # RESOURCE LIMITS (50 % of host)
