@@ -32,6 +32,7 @@ ADMIN_DIR="$SCRIPT_DIR/admin"
 # ── defaults ─────────────────────────────────────────────────────────────────
 STATS_URL="http://127.0.0.1:445/stats"
 PANEL_PORT=8080
+PANEL_HOST="127.0.0.1"   # bind localhost-only; use SSH tunnel or nginx to expose
 ADMIN_USER="admin"
 ADMIN_PASS="${ADMIN_PASS:-}"
 PROXY_NAME="MTProto Proxy"
@@ -39,17 +40,20 @@ DATA_DIR="/opt/mtproto-admin"
 POLL_SECS=60
 CONTAINER_NAME="mtproto-admin"
 IMAGE_NAME="mtproto-admin:latest"
+SSH_PORT=2222            # server SSH port (for tunnel instructions)
 
 # ── arg parsing ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --stats-url) STATS_URL="$2";  shift 2 ;;
-    --port)      PANEL_PORT="$2"; shift 2 ;;
-    --user)      ADMIN_USER="$2"; shift 2 ;;
-    --pass)      ADMIN_PASS="$2"; shift 2 ;;
-    --name)      PROXY_NAME="$2"; shift 2 ;;
-    --data)      DATA_DIR="$2";   shift 2 ;;
-    --poll)      POLL_SECS="$2";  shift 2 ;;
+    --stats-url)  STATS_URL="$2";   shift 2 ;;
+    --port)       PANEL_PORT="$2";  shift 2 ;;
+    --bind)       PANEL_HOST="$2";  shift 2 ;;
+    --user)       ADMIN_USER="$2";  shift 2 ;;
+    --pass)       ADMIN_PASS="$2";  shift 2 ;;
+    --name)       PROXY_NAME="$2";  shift 2 ;;
+    --data)       DATA_DIR="$2";    shift 2 ;;
+    --poll)       POLL_SECS="$2";   shift 2 ;;
+    --ssh-port)   SSH_PORT="$2";    shift 2 ;;
     *) die "Unknown option: $1" ;;
   esac
 done
@@ -89,13 +93,14 @@ docker run \
     \
     --volume "$DATA_DIR:/data" \
     \
-    --env "STATS_URL=$STATS_URL"   \
-    --env "PANEL_PORT=$PANEL_PORT" \
-    --env "ADMIN_USER=$ADMIN_USER" \
-    --env "ADMIN_PASS=$ADMIN_PASS" \
-    --env "PROXY_NAME=$PROXY_NAME" \
-    --env "POLL_SECS=$POLL_SECS"   \
-    --env "DB_PATH=/data/stats.db" \
+    --env "STATS_URL=$STATS_URL"     \
+    --env "PANEL_PORT=$PANEL_PORT"   \
+    --env "PANEL_HOST=$PANEL_HOST"   \
+    --env "ADMIN_USER=$ADMIN_USER"   \
+    --env "ADMIN_PASS=$ADMIN_PASS"   \
+    --env "PROXY_NAME=$PROXY_NAME"   \
+    --env "POLL_SECS=$POLL_SECS"     \
+    --env "DB_PATH=/data/stats.db"   \
     \
     "$IMAGE_NAME" >/dev/null
 
@@ -117,13 +122,26 @@ echo ""
 echo "══════════════════════════════════════════════════════════════"
 echo "  Admin Panel is running"
 echo "──────────────────────────────────────────────────────────────"
-echo "  URL      : http://${HOST_IP}:${PANEL_PORT}/"
+echo "  Bound    : ${PANEL_HOST}:${PANEL_PORT}  (localhost-only)"
 echo "  User     : ${ADMIN_USER}"
 echo "  Stats src: ${STATS_URL}"
 echo "  Data dir : ${DATA_DIR}"
 echo "  Poll     : every ${POLL_SECS}s"
 echo "──────────────────────────────────────────────────────────────"
-echo "  Logs     : docker logs -f ${CONTAINER_NAME}"
-echo "  Stop     : docker stop ${CONTAINER_NAME}"
-echo "  Remove   : docker rm -f ${CONTAINER_NAME}"
+echo "  ── Access via SSH tunnel (recommended) ──"
+echo "  ssh -p ${SSH_PORT} -N -L ${PANEL_PORT}:127.0.0.1:${PANEL_PORT} root@${HOST_IP}"
+echo "  Then open: http://127.0.0.1:${PANEL_PORT}/"
+echo ""
+echo "  ── OR expose via nginx (add to server block) ──"
+echo "  location /admin/ {"
+echo "    proxy_pass         http://127.0.0.1:${PANEL_PORT}/;"
+echo "    proxy_set_header   Host \$host;"
+echo "    proxy_set_header   X-Real-IP \$remote_addr;"
+echo "    auth_basic         \"Admin\";"
+echo "    auth_basic_user_file /etc/nginx/.htpasswd;  # optional extra layer"
+echo "  }"
+echo "──────────────────────────────────────────────────────────────"
+echo "  Logs   : docker logs -f ${CONTAINER_NAME}"
+echo "  Stop   : docker stop ${CONTAINER_NAME}"
+echo "  Remove : docker rm -f ${CONTAINER_NAME}"
 echo "══════════════════════════════════════════════════════════════"

@@ -18,6 +18,7 @@ STATS_URL   = os.getenv("STATS_URL",   "http://127.0.0.1:445/stats")
 POLL_SECS   = int(os.getenv("POLL_SECS",   "60"))
 DB_PATH     = os.getenv("DB_PATH",     "/data/stats.db")
 PANEL_PORT  = int(os.getenv("PANEL_PORT",  "8080"))
+PANEL_HOST  = os.getenv("PANEL_HOST",  "127.0.0.1")   # localhost-only by default
 ADMIN_USER  = os.getenv("ADMIN_USER",  "admin")
 ADMIN_PASS  = os.getenv("ADMIN_PASS",  "changeme")
 PROXY_NAME  = os.getenv("PROXY_NAME",  "MTProto Proxy")
@@ -190,4 +191,4 @@ if __name__ == "__main__":
     init_db()
     t = threading.Thread(target=poll_loop, daemon=True)
     t.start()
-    app.run(host="0.0.0.0", port=PANEL_PORT, debug=False)
+    app.run(host=PANEL_HOST, port=PANEL_PORT, debug=False)
