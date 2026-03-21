@@ -40,6 +40,7 @@ DATA_DIR="/opt/mtproto-admin"
 POLL_SECS=60
 CONTAINER_NAME="mtproto-admin"
 IMAGE_NAME="mtproto-admin:latest"
+MTG_CONTAINER="mtproto-proxy"
 SSH_PORT=2222            # server SSH port (for tunnel instructions)
 
 # ── arg parsing ───────────────────────────────────────────────────────────────
@@ -53,7 +54,8 @@ while [[ $# -gt 0 ]]; do
     --name)       PROXY_NAME="$2";  shift 2 ;;
     --data)       DATA_DIR="$2";    shift 2 ;;
     --poll)       POLL_SECS="$2";   shift 2 ;;
-    --ssh-port)   SSH_PORT="$2";    shift 2 ;;
+    --ssh-port)   SSH_PORT="$2";       shift 2 ;;
+    --mtg)        MTG_CONTAINER="$2"; shift 2 ;;
     *) die "Unknown option: $1" ;;
   esac
 done
@@ -92,15 +94,17 @@ docker run \
     --security-opt no-new-privileges \
     \
     --volume "$DATA_DIR:/data" \
+    --volume /var/run/docker.sock:/var/run/docker.sock:ro \
     \
-    --env "STATS_URL=$STATS_URL"     \
-    --env "PANEL_PORT=$PANEL_PORT"   \
-    --env "PANEL_HOST=$PANEL_HOST"   \
-    --env "ADMIN_USER=$ADMIN_USER"   \
-    --env "ADMIN_PASS=$ADMIN_PASS"   \
-    --env "PROXY_NAME=$PROXY_NAME"   \
-    --env "POLL_SECS=$POLL_SECS"     \
-    --env "DB_PATH=/data/stats.db"   \
+    --env "STATS_URL=$STATS_URL"           \
+    --env "PANEL_PORT=$PANEL_PORT"         \
+    --env "PANEL_HOST=$PANEL_HOST"         \
+    --env "ADMIN_USER=$ADMIN_USER"         \
+    --env "ADMIN_PASS=$ADMIN_PASS"         \
+    --env "PROXY_NAME=$PROXY_NAME"         \
+    --env "POLL_SECS=$POLL_SECS"           \
+    --env "DB_PATH=/data/stats.db"         \
+    --env "MTG_CONTAINER=$MTG_CONTAINER"   \
     \
     "$IMAGE_NAME" >/dev/null
 
