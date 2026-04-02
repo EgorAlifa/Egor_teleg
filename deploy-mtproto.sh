@@ -186,8 +186,34 @@ HOST_IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null \
        || curl -s --max-time 5 https://api.ipify.org 2>/dev/null \
        || hostname -I | awk '{print $1}')
 
-SHARE_LINK="https://t.me/proxy?server=${HOST_IP}&port=${PROXY_PORT}&secret=${SECRET}"
-DEEP_LINK="tg://proxy?server=${HOST_IP}&port=${PROXY_PORT}&secret=${SECRET}"
+# =============================================================================
+# IPTABLES REDIRECT 443 → PROXY_PORT
+# Makes traffic appear as standard HTTPS to ISP DPI while mtg keeps listening
+# on its configured port. Only applied when PROXY_PORT is not already 443.
+# The check prevents duplicate rules on repeated deploys.
+# =============================================================================
+NAT_PORT=443
+if [[ "$PROXY_PORT" -ne "$NAT_PORT" ]]; then
+    if ! iptables -t nat -C PREROUTING -p tcp --dport "$NAT_PORT" -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null; then
+        info "Adding iptables redirect: TCP ${NAT_PORT} → ${PROXY_PORT} ..."
+        iptables -t nat -A PREROUTING -p tcp --dport "$NAT_PORT" -j REDIRECT --to-port "$PROXY_PORT"
+        ok "iptables rule added."
+    else
+        ok "iptables redirect ${NAT_PORT} → ${PROXY_PORT} already present, skipping."
+    fi
+
+    # Persist across reboots — try both common methods silently
+    if command -v iptables-save >/dev/null 2>&1; then
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null && \
+            ok "iptables rules saved to /etc/iptables/rules.v4" || \
+            warn "Could not save iptables rules — reboot may clear the redirect. Run: iptables-save > /etc/iptables/rules.v4"
+    fi
+fi
+
+SHARE_LINK="https://t.me/proxy?server=${HOST_IP}&port=${NAT_PORT}&secret=${SECRET}"
+SHARE_LINK_DIRECT="https://t.me/proxy?server=${HOST_IP}&port=${PROXY_PORT}&secret=${SECRET}"
+DEEP_LINK="tg://proxy?server=${HOST_IP}&port=${NAT_PORT}&secret=${SECRET}"
 
 echo ""
 echo -e "\033[1;32m╔══════════════════════════════════════════════════════════════╗\033[0m"
@@ -200,9 +226,14 @@ echo "  SECRET : ${SECRET}"
 echo ""
 echo -e "\033[1m  ── One-tap connection links ──\033[0m"
 echo ""
-echo "  Share link  (works in browser / chat):"
+echo "  Share link  (port 443 — recommended, bypasses ISP throttling):"
 echo "  ${SHARE_LINK}"
 echo ""
+if [[ "$PROXY_PORT" -ne "$NAT_PORT" ]]; then
+echo "  Share link  (port ${PROXY_PORT} — direct, also works):"
+echo "  ${SHARE_LINK_DIRECT}"
+echo ""
+fi
 echo "  Deep link (paste in Telegram → open directly):"
 echo "  ${DEEP_LINK}"
 echo ""
@@ -213,7 +244,7 @@ echo "  Mobile:   Settings → Data & Storage → Proxy → Add Proxy"
 echo ""
 echo "    Type   : MTProto"
 echo "    Server : ${HOST_IP}"
-echo "    Port   : ${PROXY_PORT}"
+echo "    Port   : ${NAT_PORT}  ← use this (443 = HTTPS, not throttled)"
 echo "    Secret : ${SECRET}"
 echo ""
 echo -e "\033[1m  ── Server info ──\033[0m"
@@ -222,7 +253,8 @@ echo "  Container  : ${CONTAINER_NAME}"
 echo "  Image      : ${MTG_IMAGE}"
 echo "  CPU cap    : ${CPU_LIMIT} vCPUs"
 echo "  Memory cap : ${MEM_LIMIT}"
-echo "  Fake-TLS   : ${FAKE_TLS_DOMAIN}  (traffic looks like HTTPS)"
+echo "  Fake-TLS   : ${FAKE_TLS_DOMAIN}  (traffic looks like HTTPS)
+  NAT 443→   : ${PROXY_PORT}  (iptables redirect active)"
 echo "  Stats      : curl http://127.0.0.1:${STATS_PORT}/stats  (on server)"
 echo ""
 echo -e "\033[1m  ── Commands ──\033[0m"
@@ -235,6 +267,6 @@ echo ""
 echo -e "\033[1;33m  ── SAVE THESE DETAILS — the secret cannot be recovered later ──\033[0m"
 echo ""
 echo "  SECRET : ${SECRET}"
-echo "  LINK   : ${SHARE_LINK}"
+echo "  LINK   : ${SHARE_LINK}  ← port 443"
 echo ""
 echo -e "\033[1;32m══════════════════════════════════════════════════════════════\033[0m"
