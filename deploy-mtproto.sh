@@ -107,6 +107,14 @@ if ! getent passwd mtproto >/dev/null 2>&1; then
 fi
 
 # =============================================================================
+# PRE-FIX nginx default config (Ubuntu default listens on [::]:80 which
+# fails on servers without IPv6 support, breaking mtbuddy's nginx masking)
+# =============================================================================
+if [[ -f /etc/nginx/sites-available/default ]]; then
+    sed -i '/\[::\]/d' /etc/nginx/sites-available/default
+fi
+
+# =============================================================================
 # INSTALL / RECONFIGURE proxy
 # =============================================================================
 INSTALL_ARGS="--port ${PROXY_PORT} --domain ${FAKE_DOMAIN} --yes"
