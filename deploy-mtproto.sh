@@ -93,6 +93,28 @@ if systemctl is-active --quiet mtproto-proxy 2>/dev/null; then
 fi
 
 # =============================================================================
+# PRE-CREATE system account (mtbuddy needs groupadd/useradd in PATH)
+# =============================================================================
+export PATH="$PATH:/usr/sbin:/sbin"
+
+if ! getent group mtproto >/dev/null 2>&1; then
+    groupadd -f mtproto
+    ok "Created group 'mtproto'."
+fi
+if ! getent passwd mtproto >/dev/null 2>&1; then
+    useradd -r -g mtproto -s /sbin/nologin -M mtproto
+    ok "Created user 'mtproto'."
+fi
+
+# =============================================================================
+# PRE-FIX nginx default config (Ubuntu default listens on [::]:80 which
+# fails on servers without IPv6 support, breaking mtbuddy's nginx masking)
+# =============================================================================
+if [[ -f /etc/nginx/sites-available/default ]]; then
+    sed -i '/\[::\]/d' /etc/nginx/sites-available/default
+fi
+
+# =============================================================================
 # INSTALL / RECONFIGURE proxy
 # =============================================================================
 INSTALL_ARGS="--port ${PROXY_PORT} --domain ${FAKE_DOMAIN} --yes"
