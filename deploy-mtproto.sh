@@ -1,272 +1,178 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-mtproto.sh — High-load Telegram MTProto proxy (mtg v2)
+# deploy-mtproto.sh — Telegram MTProto proxy via mtproto.zig (native install)
 #
-# WHY MTProto instead of SOCKS5?
-#   MTProto is Telegram's native protocol. mtg (Go) handles 50 000+
-#   concurrent connections on a single core, auto-generates an obfuscated
-#   secret, and disguises traffic as HTTPS (fake-TLS) — far more scalable
-#   and reliable than generic SOCKS5 for a shared public proxy.
+# WHY mtproto.zig instead of mtg?
+#   Since April 2026 Russia's TSPU does MITM TCP injection breaking all
+#   standard MTProto proxies. mtproto.zig v0.23+ defeats this via:
+#     • Fake TLS 1.3 handshake disguised as wb.ru traffic
+#     • TCPMSS=536 fragmentation so DPI never sees a full signature
+#     • nfqws fake-packet desync injected on every packet
+#   mtg v2 has none of these — it is dead in Russia.
 #
 # Usage:
-#   chmod +x deploy-mtproto.sh
 #   ./deploy-mtproto.sh [OPTIONS]
 #
 # Options:
-#   --port    <port>    Preferred port (auto-selected if busy/blocked)
-#   --domain  <domain>  Fake-TLS SNI domain     (default: www.google.com)
-#   --secret  <secret>  Reuse an existing secret (default: generate new)
-#   --name    <name>    Container name           (default: mtproto-proxy)
-#   --cpu     <cpus>    CPU cap e.g. 1.0         (default: auto / 50 %)
-#   --mem     <mem>     Memory cap e.g. 512m     (default: auto / 50 %)
+#   --port    <port>    Listen port        (default: 444)
+#   --domain  <domain>  Fake-TLS SNI       (default: wb.ru)
+#   --secret  <secret>  Reuse 32-hex secret (default: generate new)
+#   --no-dpi            Skip TCPMSS/nfqws  (not recommended for Russia)
 #   --help              Show this help
 #
-# After deploy the script prints:
-#   • The obfuscated SECRET (the "key" users share)
-#   • A one-tap tg:// deep link
-#   • A https://t.me/proxy share link
-#   • Step-by-step manual setup for Telegram Desktop / Mobile
+# Installs mtbuddy to /usr/local/bin and the proxy to /opt/mtproto-proxy.
+# Creates a systemd service: mtproto-proxy.service
 # =============================================================================
-
 set -euo pipefail
 
-# ── Defaults ──────────────────────────────────────────────────────────────────
-PREFERRED_PORT=444
-CONTAINER_NAME="mtproto-proxy"
-MTG_IMAGE="ghcr.io/9seconds/mtg:2"
-FAKE_TLS_DOMAIN="www.google.com"
-SECRET=""
-CPU_LIMIT=""
-MEM_LIMIT=""
+PROXY_PORT=444
+FAKE_DOMAIN="wb.ru"
+SECRET_ARG=""
+DPI_FLAG=""
 
-# ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --port)    PREFERRED_PORT="$2";    shift 2 ;;
-        --domain)  FAKE_TLS_DOMAIN="$2";   shift 2 ;;
-        --secret)  SECRET="$2";            shift 2 ;;
-        --name)    CONTAINER_NAME="$2";    shift 2 ;;
-        --cpu)     CPU_LIMIT="$2";         shift 2 ;;
-        --mem)     MEM_LIMIT="$2";         shift 2 ;;
-        --help)
-            sed -n '/^# Usage/,/^# ====/p' "$0" | head -n -1
-            exit 0 ;;
+        --port)    PROXY_PORT="$2";   shift 2 ;;
+        --domain)  FAKE_DOMAIN="$2";  shift 2 ;;
+        --secret)  SECRET_ARG="$2";   shift 2 ;;
+        --no-dpi)  DPI_FLAG="--no-dpi"; shift ;;
+        --help)    grep '^# ' "$0" | head -25; exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 info()  { echo -e "\033[1;34m[INFO]\033[0m  $*"; }
 ok()    { echo -e "\033[1;32m[OK]\033[0m    $*"; }
 warn()  { echo -e "\033[1;33m[WARN]\033[0m  $*"; }
 die()   { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
 
-# ── Pre-flight ────────────────────────────────────────────────────────────────
-command -v docker >/dev/null 2>&1 || die "Docker is not installed or not in PATH."
+[[ "$(id -u)" -eq 0 ]] || die "Run as root: sudo ./deploy-mtproto.sh"
+command -v curl >/dev/null 2>&1 || die "curl is required."
 
 # =============================================================================
-# PORT SELECTION — use the preferred port directly.
-# The old container is removed later (before docker run), so the port is free.
-# Pass --port <N> to override.
+# CLEAN UP old Docker-based proxies
 # =============================================================================
-PROXY_PORT="$PREFERRED_PORT"
-ok "Using port: ${PROXY_PORT}"
-
-# =============================================================================
-# RESOURCE LIMITS (50 % of host)
-# =============================================================================
-if [[ -z "$CPU_LIMIT" ]]; then
-    TOTAL_CPUS=$(nproc)
-    HALF_CPUS=$(echo "$TOTAL_CPUS / 2" | bc -l | xargs printf "%.2f")
-    CPU_LIMIT=$(echo "$HALF_CPUS 0.50" | awk '{print ($1 > $2) ? $1 : $2}')
-    info "Auto CPU limit: ${CPU_LIMIT} vCPUs (50 % of ${TOTAL_CPUS})"
-fi
-
-if [[ -z "$MEM_LIMIT" ]]; then
-    TOTAL_MEM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-    HALF_MEM_MB=$(( TOTAL_MEM_KB / 2 / 1024 ))
-    [[ $HALF_MEM_MB -lt 128 ]] && HALF_MEM_MB=128
-    MEM_LIMIT="${HALF_MEM_MB}m"
-    info "Auto memory limit: ${MEM_LIMIT} (50 % of ~$(( TOTAL_MEM_KB / 1024 )) MB)"
+if command -v docker >/dev/null 2>&1; then
+    for cname in mtproto-proxy socks5-proxy; do
+        if docker ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
+            info "Removing old container '${cname}' ..."
+            docker rm -f "$cname" >/dev/null
+            ok "Removed ${cname}."
+        fi
+    done
 fi
 
 # =============================================================================
-# GENERATE SECRET (if not supplied)
-# The secret is the "key" shared with users. It encodes the fake-TLS domain
-# so Telegram clients know which SNI to use when connecting.
+# REMOVE stale iptables REDIRECT rules left by old deploy-mtproto.sh
 # =============================================================================
-if [[ -z "$SECRET" ]]; then
-    info "Pulling mtg image: ${MTG_IMAGE} ..."
-    docker pull --quiet "$MTG_IMAGE"
+if iptables -t nat -C PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 444 2>/dev/null; then
+    info "Removing old iptables redirect 443 → 444 ..."
+    iptables -t nat -D PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 444
+    ok "iptables redirect removed."
+fi
 
-    info "Generating MTProto secret (fake-TLS domain: ${FAKE_TLS_DOMAIN}) ..."
-
-    # mtg v2 syntax: generate-secret <hostname>
-    # Use --hex for predictable output; fall back without it if unsupported.
-    SECRET=$(docker run --rm "$MTG_IMAGE" generate-secret --hex "${FAKE_TLS_DOMAIN}" 2>/dev/null || true)
-    [[ -z "$SECRET" ]] && \
-        SECRET=$(docker run --rm "$MTG_IMAGE" generate-secret "${FAKE_TLS_DOMAIN}" 2>/dev/null || true)
+# =============================================================================
+# INSTALL mtbuddy (if not present or outdated)
+# =============================================================================
+if ! command -v mtbuddy >/dev/null 2>&1; then
+    info "Installing mtbuddy ..."
+    curl -fsSL https://raw.githubusercontent.com/sleep3r/mtproto.zig/main/deploy/bootstrap.sh | bash
+    ok "mtbuddy installed: $(mtbuddy --version 2>/dev/null || echo 'ok')"
 else
-    info "Using provided secret."
-fi
-
-[[ -z "$SECRET" ]] && die "Failed to generate secret. Run manually to debug:
-  docker run --rm ${MTG_IMAGE} generate-secret --help"
-
-# =============================================================================
-# REMOVE OLD CONTAINER
-# =============================================================================
-if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    info "Removing existing container '${CONTAINER_NAME}' ..."
-    docker rm -f "$CONTAINER_NAME"
+    info "mtbuddy already installed, updating ..."
+    mtbuddy update --yes 2>/dev/null || true
+    ok "mtbuddy up to date."
 fi
 
 # =============================================================================
-# WRITE CONFIG FILE
-# mtg v2 requires a TOML config file; it does not accept CLI arguments for
-# the secret or bind address.
+# STOP existing mtproto.zig service before reinstalling
 # =============================================================================
-MTG_CONFIG_DIR="/etc/mtg"
-MTG_CONFIG_FILE="${MTG_CONFIG_DIR}/config.toml"
-STATS_PORT=4444   # fixed port; avoids collision with nginx which owns 443-448
-mkdir -p "$MTG_CONFIG_DIR"
-cat > "$MTG_CONFIG_FILE" <<TOML
-secret  = "${SECRET}"
-bind-to = "0.0.0.0:${PROXY_PORT}"
-
-[stats.prometheus]
-enabled = true
-bind-to = "127.0.0.1:${STATS_PORT}"
-TOML
-chmod 600 "$MTG_CONFIG_FILE"
-ok "Config written to ${MTG_CONFIG_FILE}"
-
-# =============================================================================
-# START CONTAINER
-# High-load tuning:
-#   --ulimit nofile  — allow hundreds of thousands of open file descriptors
-#   --network host   — bypass Docker NAT; bind directly on the host interface
-# Note: --sysctl flags are not allowed with --network host (host-namespace
-# sysctls must be set on the host itself, not via Docker).
-# =============================================================================
-info "Starting MTProto proxy container ..."
-docker run \
-    --name "$CONTAINER_NAME" \
-    --restart unless-stopped \
-    --detach \
-    \
-    --cpus "$CPU_LIMIT" \
-    --memory "$MEM_LIMIT" \
-    --memory-swap "$MEM_LIMIT" \
-    \
-    --network host \
-    \
-    --ulimit nofile=1048576:1048576 \
-    \
-    --cap-drop ALL \
-    --cap-add  NET_BIND_SERVICE \
-    --security-opt no-new-privileges \
-    \
-    --volume "${MTG_CONFIG_FILE}:/config.toml:ro" \
-    \
-    "$MTG_IMAGE" \
-    run /config.toml \
-    > /dev/null
-
-# =============================================================================
-# PROXY CONFIG CARD
-# =============================================================================
-sleep 2
-
-if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    die "Container failed to start. Logs: docker logs ${CONTAINER_NAME}"
+if systemctl is-active --quiet mtproto-proxy 2>/dev/null; then
+    info "Stopping existing mtproto-proxy service ..."
+    systemctl stop mtproto-proxy
 fi
+
+# =============================================================================
+# INSTALL / RECONFIGURE proxy
+# =============================================================================
+INSTALL_ARGS="--port ${PROXY_PORT} --domain ${FAKE_DOMAIN} --yes"
+[[ -n "$SECRET_ARG"  ]] && INSTALL_ARGS+=" --secret ${SECRET_ARG}"
+[[ -n "$DPI_FLAG"    ]] && INSTALL_ARGS+=" ${DPI_FLAG}"
+
+info "Installing mtproto.zig proxy (port=${PROXY_PORT}, domain=${FAKE_DOMAIN}) ..."
+# shellcheck disable=SC2086
+mtbuddy install $INSTALL_ARGS
+
+# =============================================================================
+# VERIFY SERVICE
+# =============================================================================
+sleep 3
+if ! systemctl is-active --quiet mtproto-proxy 2>/dev/null; then
+    die "Service mtproto-proxy failed to start. Check: journalctl -u mtproto-proxy -n 50"
+fi
+ok "Service mtproto-proxy is running."
+
+# =============================================================================
+# READ SECRET FROM CONFIG
+# =============================================================================
+CONFIG_FILE="/opt/mtproto-proxy/config.toml"
+SECRET=""
+if [[ -f "$CONFIG_FILE" ]]; then
+    SECRET=$(grep -E '^\s*secret\s*=' "$CONFIG_FILE" | head -1 \
+             | sed 's/.*=\s*"\?\([0-9a-fA-F]*\)"\?.*/\1/')
+fi
+[[ -z "$SECRET" ]] && warn "Could not read secret from config — check ${CONFIG_FILE}"
 
 HOST_IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null \
        || curl -s --max-time 5 https://api.ipify.org 2>/dev/null \
        || hostname -I | awk '{print $1}')
 
-# =============================================================================
-# IPTABLES REDIRECT 443 → PROXY_PORT
-# Makes traffic appear as standard HTTPS to ISP DPI while mtg keeps listening
-# on its configured port. Only applied when PROXY_PORT is not already 443.
-# The check prevents duplicate rules on repeated deploys.
-# =============================================================================
-NAT_PORT=443
-if [[ "$PROXY_PORT" -ne "$NAT_PORT" ]]; then
-    if ! iptables -t nat -C PREROUTING -p tcp --dport "$NAT_PORT" -j REDIRECT --to-port "$PROXY_PORT" 2>/dev/null; then
-        info "Adding iptables redirect: TCP ${NAT_PORT} → ${PROXY_PORT} ..."
-        iptables -t nat -A PREROUTING -p tcp --dport "$NAT_PORT" -j REDIRECT --to-port "$PROXY_PORT"
-        ok "iptables rule added."
-    else
-        ok "iptables redirect ${NAT_PORT} → ${PROXY_PORT} already present, skipping."
-    fi
-
-    # Persist across reboots — try both common methods silently
-    if command -v iptables-save >/dev/null 2>&1; then
-        mkdir -p /etc/iptables
-        iptables-save > /etc/iptables/rules.v4 2>/dev/null && \
-            ok "iptables rules saved to /etc/iptables/rules.v4" || \
-            warn "Could not save iptables rules — reboot may clear the redirect. Run: iptables-save > /etc/iptables/rules.v4"
-    fi
-fi
-
-SHARE_LINK="https://t.me/proxy?server=${HOST_IP}&port=${NAT_PORT}&secret=${SECRET}"
-SHARE_LINK_DIRECT="https://t.me/proxy?server=${HOST_IP}&port=${PROXY_PORT}&secret=${SECRET}"
-DEEP_LINK="tg://proxy?server=${HOST_IP}&port=${NAT_PORT}&secret=${SECRET}"
+SHARE_LINK="https://t.me/proxy?server=${HOST_IP}&port=${PROXY_PORT}&secret=${SECRET}"
+DEEP_LINK="tg://proxy?server=${HOST_IP}&port=${PROXY_PORT}&secret=${SECRET}"
 
 echo ""
 echo -e "\033[1;32m╔══════════════════════════════════════════════════════════════╗\033[0m"
-echo -e "\033[1;32m║        TELEGRAM MTProto PROXY — READY                        ║\033[0m"
+echo -e "\033[1;32m║        TELEGRAM MTProto PROXY — READY (mtproto.zig)           ║\033[0m"
 echo -e "\033[1;32m╚══════════════════════════════════════════════════════════════╝\033[0m"
 echo ""
-echo -e "\033[1m  ── Your proxy secret (share this with users) ──\033[0m"
+echo -e "\033[1m  ── DPI bypass ──\033[0m"
 echo ""
-echo "  SECRET : ${SECRET}"
+echo "  Engine     : mtproto.zig v0.23+ (native, not Docker)"
+echo "  Fake-TLS   : ${FAKE_DOMAIN}  (traffic looks like HTTPS to ${FAKE_DOMAIN})"
+echo "  TCPMSS     : 536  (packet fragmentation, DPI blind spot)"
+echo "  nfqws      : active  (fake-packet desync on every packet)"
 echo ""
-echo -e "\033[1m  ── One-tap connection links ──\033[0m"
+echo -e "\033[1m  ── Connection details ──\033[0m"
 echo ""
-echo "  Share link  (port 443 — recommended, bypasses ISP throttling):"
+echo "  Server : ${HOST_IP}"
+echo "  Port   : ${PROXY_PORT}"
+echo "  Secret : ${SECRET}"
+echo ""
+echo -e "\033[1m  ── One-tap links ──\033[0m"
+echo ""
 echo "  ${SHARE_LINK}"
-echo ""
-if [[ "$PROXY_PORT" -ne "$NAT_PORT" ]]; then
-echo "  Share link  (port ${PROXY_PORT} — direct, also works):"
-echo "  ${SHARE_LINK_DIRECT}"
-echo ""
-fi
-echo "  Deep link (paste in Telegram → open directly):"
 echo "  ${DEEP_LINK}"
 echo ""
 echo -e "\033[1m  ── Manual setup in Telegram ──\033[0m"
 echo ""
-echo "  Desktop:  Settings → Privacy & Security → Proxy → Add Proxy"
-echo "  Mobile:   Settings → Data & Storage → Proxy → Add Proxy"
+echo "  Settings → Data & Storage → Proxy → Add Proxy"
 echo ""
 echo "    Type   : MTProto"
 echo "    Server : ${HOST_IP}"
-echo "    Port   : ${NAT_PORT}  ← use this (443 = HTTPS, not throttled)"
+echo "    Port   : ${PROXY_PORT}"
 echo "    Secret : ${SECRET}"
 echo ""
-echo -e "\033[1m  ── Server info ──\033[0m"
+echo -e "\033[1m  ── Service commands ──\033[0m"
 echo ""
-echo "  Container  : ${CONTAINER_NAME}"
-echo "  Image      : ${MTG_IMAGE}"
-echo "  CPU cap    : ${CPU_LIMIT} vCPUs"
-echo "  Memory cap : ${MEM_LIMIT}"
-echo "  Fake-TLS   : ${FAKE_TLS_DOMAIN}  (traffic looks like HTTPS)
-  NAT 443→   : ${PROXY_PORT}  (iptables redirect active)"
-echo "  Stats      : curl http://127.0.0.1:${STATS_PORT}/stats  (on server)"
-echo ""
-echo -e "\033[1m  ── Commands ──\033[0m"
-echo ""
-echo "  Logs       : docker logs -f ${CONTAINER_NAME}"
-echo "  Stats      : curl -s http://127.0.0.1:${STATS_PORT}/stats | python3 -m json.tool"
-echo "  Stop       : docker stop ${CONTAINER_NAME}"
-echo "  Remove     : docker rm -f ${CONTAINER_NAME}"
+echo "  Status : systemctl status mtproto-proxy"
+echo "  Logs   : journalctl -u mtproto-proxy -f"
+echo "  Stop   : systemctl stop mtproto-proxy"
+echo "  Update : mtbuddy update --yes"
+echo "  Stats  : mtbuddy status"
 echo ""
 echo -e "\033[1;33m  ── SAVE THESE DETAILS — the secret cannot be recovered later ──\033[0m"
 echo ""
 echo "  SECRET : ${SECRET}"
-echo "  LINK   : ${SHARE_LINK}  ← port 443"
+echo "  LINK   : ${SHARE_LINK}"
 echo ""
 echo -e "\033[1;32m══════════════════════════════════════════════════════════════\033[0m"
