@@ -137,8 +137,17 @@ fi
 # PRE-FIX nginx default config (Ubuntu default listens on [::]:80 which
 # fails on servers without IPv6 support, breaking mtbuddy's nginx masking)
 # =============================================================================
-if [[ -f /etc/nginx/sites-available/default ]]; then
-    sed -i '/\[::\]/d' /etc/nginx/sites-available/default
+for f in /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default; do
+    [[ -f "$f" ]] && sed -i '/\[::\]/d' "$f"
+done
+
+# =============================================================================
+# PICK nginx masking port — avoid 8443 if Xray already owns it
+# =============================================================================
+MASK_PORT=8443
+if ss -tlnp | grep -q ':8443 '; then
+    MASK_PORT=18443
+    info "Port 8443 in use (Xray), using ${MASK_PORT} for nginx masking."
 fi
 
 # =============================================================================
@@ -151,6 +160,17 @@ INSTALL_ARGS="--port ${PROXY_PORT} --domain ${FAKE_DOMAIN} --yes"
 info "Installing mtproto.zig proxy (port=${PROXY_PORT}, domain=${FAKE_DOMAIN}) ..."
 # shellcheck disable=SC2086
 mtbuddy install $INSTALL_ARGS
+
+# Fix nginx masking port if Xray owns 8443
+if [[ "$MASK_PORT" -ne 8443 ]]; then
+    if grep -q '127\.0\.0\.1:8443' /etc/nginx/sites-available/mtproto-masking 2>/dev/null; then
+        sed -i "s/127\.0\.0\.1:8443/127.0.0.1:${MASK_PORT}/g" /etc/nginx/sites-available/mtproto-masking
+        sed -i "s/mask_port = 8443/mask_port = ${MASK_PORT}/" /opt/mtproto-proxy/config.toml 2>/dev/null || true
+        systemctl restart nginx 2>/dev/null || true
+        systemctl reload mtproto-proxy 2>/dev/null || true
+        ok "nginx masking port changed to ${MASK_PORT}."
+    fi
+fi
 
 # =============================================================================
 # VERIFY SERVICE
