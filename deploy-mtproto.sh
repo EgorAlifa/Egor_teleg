@@ -94,8 +94,20 @@ fi
 
 # =============================================================================
 # PRE-CREATE system account (mtbuddy needs groupadd/useradd in PATH)
+# mtbuddy spawns children with empty environment — symlinks fix path lookups.
 # =============================================================================
 export PATH="$PATH:/usr/sbin:/sbin"
+
+# Symlinks so mtbuddy (empty-env child) finds tools at its hardcoded paths
+ln -sf /usr/sbin/iptables   /usr/bin/iptables   2>/dev/null || true
+ln -sf /usr/sbin/ip6tables  /usr/bin/ip6tables  2>/dev/null || true
+ln -sf /usr/bin/bash        /usr/local/bin/bash 2>/dev/null || true
+ln -sf /usr/bin/env         /usr/local/bin/env  2>/dev/null || true
+
+# gcc cc1 lives in /usr/libexec on Ubuntu 24.04 but gcc looks in /usr/lib
+if [[ -d /usr/libexec/gcc && ! -e /usr/lib/gcc ]]; then
+    ln -sf /usr/libexec/gcc /usr/lib/gcc
+fi
 
 if ! getent group mtproto >/dev/null 2>&1; then
     groupadd -f mtproto
@@ -104,6 +116,21 @@ fi
 if ! getent passwd mtproto >/dev/null 2>&1; then
     useradd -r -g mtproto -s /sbin/nologin -M mtproto
     ok "Created user 'mtproto'."
+fi
+
+# Pre-build nfqws manually (mtbuddy's make uses 'cc' which can't find cc1)
+if [[ ! -x /opt/zapret/nfq/nfqws ]]; then
+    info "Pre-building nfqws with gcc ..."
+    BUILD_DIR=$(mktemp -d)
+    git clone --depth=1 https://github.com/bol-van/zapret "$BUILD_DIR/zapret" -q
+    gcc -s -std=gnu99 -Os -o "$BUILD_DIR/zapret/nfq/nfqws" \
+        "$BUILD_DIR/zapret/nfq/"*.c "$BUILD_DIR/zapret/nfq/crypto/"*.c \
+        -lz -lnetfilter_queue -lnfnetlink -lmnl
+    mkdir -p /opt/zapret/nfq
+    cp -r "$BUILD_DIR/zapret/"* /opt/zapret/
+    chmod +x /opt/zapret/nfq/nfqws
+    rm -rf "$BUILD_DIR"
+    ok "nfqws built and placed at /opt/zapret/nfq/nfqws"
 fi
 
 # =============================================================================
