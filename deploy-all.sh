@@ -5,8 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo -e "\033[1;34m[1/2]\033[0m Deploying MTProto proxy ..."
-bash "$SCRIPT_DIR/deploy-mtproto.sh" "$@"
+echo -e "\033[1;34m[1/2]\033[0m Deploying SOCKS5 proxy ..."
+bash "$SCRIPT_DIR/deploy-socks5.sh" "$@"
 
 echo ""
 echo -e "\033[1;34m[2/2]\033[0m Deploying admin panel ..."
