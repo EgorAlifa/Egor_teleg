@@ -174,9 +174,29 @@ if [[ "$MASK_PORT" -ne 8443 ]]; then
         sed -i "s/127\.0\.0\.1:8443/127.0.0.1:${MASK_PORT}/g" /etc/nginx/sites-available/mtproto-masking
         sed -i "s/mask_port = 8443/mask_port = ${MASK_PORT}/" /opt/mtproto-proxy/config.toml 2>/dev/null || true
         systemctl restart nginx 2>/dev/null || true
-        systemctl reload mtproto-proxy 2>/dev/null || true
         ok "nginx masking port changed to ${MASK_PORT}."
     fi
+fi
+
+# =============================================================================
+# PATCH config.toml with June 2026 recommended settings
+# mtbuddy may keep existing config ("Config already exists") — force these.
+# =============================================================================
+CONFIG="/opt/mtproto-proxy/config.toml"
+if [[ -f "$CONFIG" ]]; then
+    # drs = true  — Dynamic Record Sizing, mimics Chrome/Firefox TLS packet sizes
+    sed -i 's/^drs = false/drs = true/' "$CONFIG"
+    grep -q '^drs' "$CONFIG" || sed -i '/^\[censorship\]/a drs = true' "$CONFIG"
+
+    # fake_tls_only = true  — reject plain dd-transport, force FakeTLS only
+    grep -q 'fake_tls_only' "$CONFIG" || \
+        sed -i '/^drs = true/a fake_tls_only = true' "$CONFIG"
+
+    # max_connections — mtbuddy may ignore --max-connections if config exists
+    sed -i "s/^max_connections = .*/max_connections = ${MAX_CONN}/" "$CONFIG"
+
+    ok "Config patched: drs=true, fake_tls_only=true, max_connections=${MAX_CONN}"
+    systemctl reload mtproto-proxy 2>/dev/null || true
 fi
 
 # =============================================================================
