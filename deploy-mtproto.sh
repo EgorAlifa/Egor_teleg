@@ -54,7 +54,7 @@ command -v curl >/dev/null 2>&1 || die "curl is required."
 # =============================================================================
 info "Installing build dependencies ..."
 apt-get install -y --no-install-recommends \
-    gcc zlib1g-dev libnetfilter-queue-dev libmnl-dev libnfnetlink-dev \
+    gcc zlib1g-dev libnetfilter-queue-dev libmnl-dev libnfnetlink-dev libcap-dev \
     >/dev/null 2>&1 && ok "Build dependencies installed." || \
     warn "apt-get failed — assuming dependencies already present."
 
