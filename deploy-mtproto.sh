@@ -153,7 +153,14 @@ fi
 # =============================================================================
 # INSTALL / RECONFIGURE proxy
 # =============================================================================
-INSTALL_ARGS="--port ${PROXY_PORT} --domain ${FAKE_DOMAIN} --yes"
+# Auto-size max connections: 90% of theoretical max (1024 per 256MB RAM)
+TOTAL_MEM_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
+MAX_CONN=$(( TOTAL_MEM_MB * 1024 / 256 * 90 / 100 ))
+[[ $MAX_CONN -lt 512  ]] && MAX_CONN=512
+[[ $MAX_CONN -gt 65535 ]] && MAX_CONN=65535
+info "Max connections: ${MAX_CONN} (90% of RAM capacity)"
+
+INSTALL_ARGS="--port ${PROXY_PORT} --domain ${FAKE_DOMAIN} --yes --max-connections ${MAX_CONN}"
 [[ -n "$SECRET_ARG"  ]] && INSTALL_ARGS+=" --secret ${SECRET_ARG}"
 [[ -n "$DPI_FLAG"    ]] && INSTALL_ARGS+=" ${DPI_FLAG}"
 
