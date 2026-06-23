@@ -188,9 +188,11 @@ if [[ -f "$CONFIG" ]]; then
     sed -i 's/^drs = false/drs = true/' "$CONFIG"
     grep -q '^drs' "$CONFIG" || sed -i '/^\[censorship\]/a drs = true' "$CONFIG"
 
-    # fake_tls_only = true  — reject plain dd-transport, force FakeTLS only
+    # fake_tls_only = false  — allow both dd and fake-TLS transport
+    # (Telegram Desktop sends dd handshake even with ee secret — true breaks Desktop)
+    sed -i 's/^fake_tls_only = true/fake_tls_only = false/' "$CONFIG"
     grep -q 'fake_tls_only' "$CONFIG" || \
-        sed -i '/^drs = true/a fake_tls_only = true' "$CONFIG"
+        sed -i '/^drs = true/a fake_tls_only = false' "$CONFIG"
 
     # max_connections — mtbuddy may ignore --max-connections if config exists
     sed -i "s/^max_connections = .*/max_connections = ${MAX_CONN}/" "$CONFIG"
