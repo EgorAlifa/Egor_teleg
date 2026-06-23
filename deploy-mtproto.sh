@@ -26,7 +26,7 @@
 set -euo pipefail
 
 PROXY_PORT=444
-FAKE_DOMAIN="wb.ru"
+FAKE_DOMAIN="ya.ru"
 SECRET_ARG=""
 DPI_FLAG=""
 
@@ -48,6 +48,15 @@ die()   { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
 
 [[ "$(id -u)" -eq 0 ]] || die "Run as root: sudo ./deploy-mtproto.sh"
 command -v curl >/dev/null 2>&1 || die "curl is required."
+
+# =============================================================================
+# INSTALL build dependencies (gcc, nfqueue libs needed for nfqws)
+# =============================================================================
+info "Installing build dependencies ..."
+apt-get install -y --no-install-recommends \
+    gcc zlib1g-dev libnetfilter-queue-dev libmnl-dev libnfnetlink-dev libcap-dev \
+    >/dev/null 2>&1 && ok "Build dependencies installed." || \
+    warn "apt-get failed — assuming dependencies already present."
 
 # =============================================================================
 # CLEAN UP old Docker-based proxies
@@ -188,14 +197,30 @@ if [[ -f "$CONFIG" ]]; then
     sed -i 's/^drs = false/drs = true/' "$CONFIG"
     grep -q '^drs' "$CONFIG" || sed -i '/^\[censorship\]/a drs = true' "$CONFIG"
 
-    # fake_tls_only = true  — reject plain dd-transport, force FakeTLS only
+    # fake_tls_only = false  — allow both dd and fake-TLS transport
+    # (Telegram Desktop sends dd handshake even with ee secret — true breaks Desktop)
+    sed -i 's/^fake_tls_only = true/fake_tls_only = false/' "$CONFIG"
     grep -q 'fake_tls_only' "$CONFIG" || \
-        sed -i '/^drs = true/a fake_tls_only = true' "$CONFIG"
+        sed -i '/^drs = true/a fake_tls_only = false' "$CONFIG"
 
     # max_connections — mtbuddy may ignore --max-connections if config exists
     sed -i "s/^max_connections = .*/max_connections = ${MAX_CONN}/" "$CONFIG"
 
-    ok "Config patched: drs=true, fake_tls_only=true, max_connections=${MAX_CONN}"
+    # tcpmss = 536 — optimal fragmentation; breaks AI DPI reassembly (88 is too slow, 1024+ not enough)
+    grep -q '^tcpmss' "$CONFIG" || sed -i '/^\[censorship\]/a tcpmss = 536' "$CONFIG"
+    sed -i 's/^tcpmss = .*/tcpmss = 536/' "$CONFIG"
+
+    # use_middle_proxy = true  — route through Telegram relay servers instead of
+    # direct DC connections; fixes DC4 (91.108.4.1) blocked from some VPS providers
+    if grep -q '^\[general\]' "$CONFIG"; then
+        sed -i 's/^use_middle_proxy = false/use_middle_proxy = true/' "$CONFIG"
+        grep -q 'use_middle_proxy' "$CONFIG" || \
+            sed -i '/^\[general\]/a use_middle_proxy = true' "$CONFIG"
+    else
+        echo -e '\n[general]\nuse_middle_proxy = true' >> "$CONFIG"
+    fi
+
+    ok "Config patched: drs=true, fake_tls_only=false, use_middle_proxy=true, tcpmss=536, max_connections=${MAX_CONN}"
     systemctl reload mtproto-proxy 2>/dev/null || true
 fi
 
