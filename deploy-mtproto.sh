@@ -195,7 +195,17 @@ if [[ -f "$CONFIG" ]]; then
     # max_connections — mtbuddy may ignore --max-connections if config exists
     sed -i "s/^max_connections = .*/max_connections = ${MAX_CONN}/" "$CONFIG"
 
-    ok "Config patched: drs=true, fake_tls_only=true, max_connections=${MAX_CONN}"
+    # use_middle_proxy = true  — route through Telegram relay servers instead of
+    # direct DC connections; fixes DC4 (91.108.4.1) blocked from some VPS providers
+    if grep -q '^\[general\]' "$CONFIG"; then
+        sed -i 's/^use_middle_proxy = false/use_middle_proxy = true/' "$CONFIG"
+        grep -q 'use_middle_proxy' "$CONFIG" || \
+            sed -i '/^\[general\]/a use_middle_proxy = true' "$CONFIG"
+    else
+        echo -e '\n[general]\nuse_middle_proxy = true' >> "$CONFIG"
+    fi
+
+    ok "Config patched: drs=true, fake_tls_only=true, use_middle_proxy=true, max_connections=${MAX_CONN}"
     systemctl reload mtproto-proxy 2>/dev/null || true
 fi
 
