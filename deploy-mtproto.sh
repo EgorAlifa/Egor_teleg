@@ -94,8 +94,20 @@ fi
 
 # =============================================================================
 # PRE-CREATE system account (mtbuddy needs groupadd/useradd in PATH)
+# mtbuddy spawns children with empty environment — symlinks fix path lookups.
 # =============================================================================
 export PATH="$PATH:/usr/sbin:/sbin"
+
+# Symlinks so mtbuddy (empty-env child) finds tools at its hardcoded paths
+ln -sf /usr/sbin/iptables   /usr/bin/iptables   2>/dev/null || true
+ln -sf /usr/sbin/ip6tables  /usr/bin/ip6tables  2>/dev/null || true
+ln -sf /usr/bin/bash        /usr/local/bin/bash 2>/dev/null || true
+ln -sf /usr/bin/env         /usr/local/bin/env  2>/dev/null || true
+
+# gcc cc1 lives in /usr/libexec on Ubuntu 24.04 but gcc looks in /usr/lib
+if [[ -d /usr/libexec/gcc && ! -e /usr/lib/gcc ]]; then
+    ln -sf /usr/libexec/gcc /usr/lib/gcc
+fi
 
 if ! getent group mtproto >/dev/null 2>&1; then
     groupadd -f mtproto
@@ -106,24 +118,86 @@ if ! getent passwd mtproto >/dev/null 2>&1; then
     ok "Created user 'mtproto'."
 fi
 
+# Pre-build nfqws manually (mtbuddy's make uses 'cc' which can't find cc1)
+if [[ ! -x /opt/zapret/nfq/nfqws ]]; then
+    info "Pre-building nfqws with gcc ..."
+    BUILD_DIR=$(mktemp -d)
+    git clone --depth=1 https://github.com/bol-van/zapret "$BUILD_DIR/zapret" -q
+    gcc -s -std=gnu99 -Os -o "$BUILD_DIR/zapret/nfq/nfqws" \
+        "$BUILD_DIR/zapret/nfq/"*.c "$BUILD_DIR/zapret/nfq/crypto/"*.c \
+        -lz -lnetfilter_queue -lnfnetlink -lmnl
+    mkdir -p /opt/zapret/nfq
+    cp -r "$BUILD_DIR/zapret/"* /opt/zapret/
+    chmod +x /opt/zapret/nfq/nfqws
+    rm -rf "$BUILD_DIR"
+    ok "nfqws built and placed at /opt/zapret/nfq/nfqws"
+fi
+
 # =============================================================================
 # PRE-FIX nginx default config (Ubuntu default listens on [::]:80 which
 # fails on servers without IPv6 support, breaking mtbuddy's nginx masking)
 # =============================================================================
-if [[ -f /etc/nginx/sites-available/default ]]; then
-    sed -i '/\[::\]/d' /etc/nginx/sites-available/default
+for f in /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default; do
+    [[ -f "$f" ]] && sed -i '/\[::\]/d' "$f"
+done
+
+# =============================================================================
+# PICK nginx masking port — avoid 8443 if Xray already owns it
+# =============================================================================
+MASK_PORT=8443
+if ss -tlnp | grep -q ':8443 '; then
+    MASK_PORT=18443
+    info "Port 8443 in use (Xray), using ${MASK_PORT} for nginx masking."
 fi
 
 # =============================================================================
 # INSTALL / RECONFIGURE proxy
 # =============================================================================
-INSTALL_ARGS="--port ${PROXY_PORT} --domain ${FAKE_DOMAIN} --yes"
+# Auto-size max connections: 90% of theoretical max (1024 per 256MB RAM)
+TOTAL_MEM_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
+MAX_CONN=$(( TOTAL_MEM_MB * 1024 / 256 * 90 / 100 ))
+[[ $MAX_CONN -lt 512  ]] && MAX_CONN=512
+[[ $MAX_CONN -gt 65535 ]] && MAX_CONN=65535
+info "Max connections: ${MAX_CONN} (90% of RAM capacity)"
+
+INSTALL_ARGS="--port ${PROXY_PORT} --domain ${FAKE_DOMAIN} --yes --max-connections ${MAX_CONN}"
 [[ -n "$SECRET_ARG"  ]] && INSTALL_ARGS+=" --secret ${SECRET_ARG}"
 [[ -n "$DPI_FLAG"    ]] && INSTALL_ARGS+=" ${DPI_FLAG}"
 
 info "Installing mtproto.zig proxy (port=${PROXY_PORT}, domain=${FAKE_DOMAIN}) ..."
 # shellcheck disable=SC2086
 mtbuddy install $INSTALL_ARGS
+
+# Fix nginx masking port if Xray owns 8443
+if [[ "$MASK_PORT" -ne 8443 ]]; then
+    if grep -q '127\.0\.0\.1:8443' /etc/nginx/sites-available/mtproto-masking 2>/dev/null; then
+        sed -i "s/127\.0\.0\.1:8443/127.0.0.1:${MASK_PORT}/g" /etc/nginx/sites-available/mtproto-masking
+        sed -i "s/mask_port = 8443/mask_port = ${MASK_PORT}/" /opt/mtproto-proxy/config.toml 2>/dev/null || true
+        systemctl restart nginx 2>/dev/null || true
+        ok "nginx masking port changed to ${MASK_PORT}."
+    fi
+fi
+
+# =============================================================================
+# PATCH config.toml with June 2026 recommended settings
+# mtbuddy may keep existing config ("Config already exists") — force these.
+# =============================================================================
+CONFIG="/opt/mtproto-proxy/config.toml"
+if [[ -f "$CONFIG" ]]; then
+    # drs = true  — Dynamic Record Sizing, mimics Chrome/Firefox TLS packet sizes
+    sed -i 's/^drs = false/drs = true/' "$CONFIG"
+    grep -q '^drs' "$CONFIG" || sed -i '/^\[censorship\]/a drs = true' "$CONFIG"
+
+    # fake_tls_only = true  — reject plain dd-transport, force FakeTLS only
+    grep -q 'fake_tls_only' "$CONFIG" || \
+        sed -i '/^drs = true/a fake_tls_only = true' "$CONFIG"
+
+    # max_connections — mtbuddy may ignore --max-connections if config exists
+    sed -i "s/^max_connections = .*/max_connections = ${MAX_CONN}/" "$CONFIG"
+
+    ok "Config patched: drs=true, fake_tls_only=true, max_connections=${MAX_CONN}"
+    systemctl reload mtproto-proxy 2>/dev/null || true
+fi
 
 # =============================================================================
 # VERIFY SERVICE
