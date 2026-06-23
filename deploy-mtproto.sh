@@ -26,7 +26,7 @@
 set -euo pipefail
 
 PROXY_PORT=444
-FAKE_DOMAIN="wb.ru"
+FAKE_DOMAIN="ya.ru"
 SECRET_ARG=""
 DPI_FLAG=""
 
@@ -197,6 +197,10 @@ if [[ -f "$CONFIG" ]]; then
     # max_connections — mtbuddy may ignore --max-connections if config exists
     sed -i "s/^max_connections = .*/max_connections = ${MAX_CONN}/" "$CONFIG"
 
+    # tcpmss = 536 — optimal fragmentation; breaks AI DPI reassembly (88 is too slow, 1024+ not enough)
+    grep -q '^tcpmss' "$CONFIG" || sed -i '/^\[censorship\]/a tcpmss = 536' "$CONFIG"
+    sed -i 's/^tcpmss = .*/tcpmss = 536/' "$CONFIG"
+
     # use_middle_proxy = true  — route through Telegram relay servers instead of
     # direct DC connections; fixes DC4 (91.108.4.1) blocked from some VPS providers
     if grep -q '^\[general\]' "$CONFIG"; then
@@ -207,7 +211,7 @@ if [[ -f "$CONFIG" ]]; then
         echo -e '\n[general]\nuse_middle_proxy = true' >> "$CONFIG"
     fi
 
-    ok "Config patched: drs=true, fake_tls_only=true, use_middle_proxy=true, max_connections=${MAX_CONN}"
+    ok "Config patched: drs=true, fake_tls_only=false, use_middle_proxy=true, tcpmss=536, max_connections=${MAX_CONN}"
     systemctl reload mtproto-proxy 2>/dev/null || true
 fi
 
