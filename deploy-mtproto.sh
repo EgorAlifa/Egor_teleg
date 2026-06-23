@@ -50,6 +50,15 @@ die()   { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || die "curl is required."
 
 # =============================================================================
+# INSTALL build dependencies (gcc, nfqueue libs needed for nfqws)
+# =============================================================================
+info "Installing build dependencies ..."
+apt-get install -y --no-install-recommends \
+    gcc zlib1g-dev libnetfilter-queue-dev libmnl-dev libnfnetlink-dev \
+    >/dev/null 2>&1 && ok "Build dependencies installed." || \
+    warn "apt-get failed — assuming dependencies already present."
+
+# =============================================================================
 # CLEAN UP old Docker-based proxies
 # =============================================================================
 if command -v docker >/dev/null 2>&1; then
