@@ -187,42 +187,6 @@ if [[ "$MASK_PORT" -ne 8443 ]]; then
     fi
 fi
 
-# =============================================================================
-# PATCH config.toml with June 2026 recommended settings
-# mtbuddy may keep existing config ("Config already exists") — force these.
-# =============================================================================
-CONFIG="/opt/mtproto-proxy/config.toml"
-if [[ -f "$CONFIG" ]]; then
-    # drs = true  — Dynamic Record Sizing, mimics Chrome/Firefox TLS packet sizes
-    sed -i 's/^drs = false/drs = true/' "$CONFIG"
-    grep -q '^drs' "$CONFIG" || sed -i '/^\[censorship\]/a drs = true' "$CONFIG"
-
-    # fake_tls_only = false  — allow both dd and fake-TLS transport
-    # (Telegram Desktop sends dd handshake even with ee secret — true breaks Desktop)
-    sed -i 's/^fake_tls_only = true/fake_tls_only = false/' "$CONFIG"
-    grep -q 'fake_tls_only' "$CONFIG" || \
-        sed -i '/^drs = true/a fake_tls_only = false' "$CONFIG"
-
-    # max_connections — mtbuddy may ignore --max-connections if config exists
-    sed -i "s/^max_connections = .*/max_connections = ${MAX_CONN}/" "$CONFIG"
-
-    # tcpmss = 536 — optimal fragmentation; breaks AI DPI reassembly (88 is too slow, 1024+ not enough)
-    grep -q '^tcpmss' "$CONFIG" || sed -i '/^\[censorship\]/a tcpmss = 88' "$CONFIG"
-    sed -i 's/^tcpmss = .*/tcpmss = 88/' "$CONFIG"
-
-    # use_middle_proxy = true  — route through Telegram relay servers instead of
-    # direct DC connections; fixes DC4 (91.108.4.1) blocked from some VPS providers
-    if grep -q '^\[general\]' "$CONFIG"; then
-        sed -i 's/^use_middle_proxy = false/use_middle_proxy = true/' "$CONFIG"
-        grep -q 'use_middle_proxy' "$CONFIG" || \
-            sed -i '/^\[general\]/a use_middle_proxy = true' "$CONFIG"
-    else
-        echo -e '\n[general]\nuse_middle_proxy = true' >> "$CONFIG"
-    fi
-
-    ok "Config patched: drs=true, fake_tls_only=false, use_middle_proxy=true, tcpmss=536, max_connections=${MAX_CONN}"
-    systemctl reload mtproto-proxy 2>/dev/null || true
-fi
 
 # =============================================================================
 # VERIFY SERVICE
