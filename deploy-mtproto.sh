@@ -26,7 +26,7 @@
 set -euo pipefail
 
 PROXY_PORT=444
-FAKE_DOMAIN="wb.ru"
+FAKE_DOMAIN="vk.com"
 SECRET_ARG=""
 DPI_FLAG=""
 FAKE_TLS_ONLY="true"
@@ -35,7 +35,11 @@ CONFIG_FILE="/opt/mtproto-proxy/config.toml"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --port)    PROXY_PORT="$2";   shift 2 ;;
-        --domain)  FAKE_DOMAIN="$2";  shift 2 ;;
+        --domain)  FAKE_DOMAIN="$2";  shift 2
+                   # wb.ru / mail.ru / ya.ru use HRR+secp521r1 — proxy breaks
+                   [[ "$FAKE_DOMAIN" =~ ^(wb\.ru|mail\.ru|ya\.ru)$ ]] && \
+                       die "Domain '${FAKE_DOMAIN}' uses HRR/secp521r1 — incompatible with FakeTLS. Use vk.com, rutube.ru, ozon.ru, yandex.ru, or dzen.ru instead." ;;
+
         --secret)  SECRET_ARG="$2";   shift 2 ;;
         --no-dpi)   DPI_FLAG="--no-dpi"; shift ;;
         --allow-dd) FAKE_TLS_ONLY="false"; shift ;;
