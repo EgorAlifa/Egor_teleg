@@ -25,7 +25,7 @@
 # =============================================================================
 set -euo pipefail
 
-PROXY_PORT=444
+PROXY_PORT=443
 FAKE_DOMAIN="vk.com"
 SECRET_ARG=""
 DPI_FLAG=""
