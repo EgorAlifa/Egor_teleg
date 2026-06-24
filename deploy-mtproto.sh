@@ -29,7 +29,7 @@ PROXY_PORT=444
 FAKE_DOMAIN="vk.com"
 SECRET_ARG=""
 DPI_FLAG=""
-FAKE_TLS_ONLY="false"
+FAKE_TLS_ONLY="true"
 CONFIG_FILE="/opt/mtproto-proxy/config.toml"
 
 while [[ $# -gt 0 ]]; do
@@ -41,8 +41,8 @@ while [[ $# -gt 0 ]]; do
                        die "Domain '${FAKE_DOMAIN}' uses HRR/secp521r1 — incompatible with FakeTLS. Use vk.com, rutube.ru, ozon.ru, yandex.ru, or dzen.ru instead." ;;
 
         --secret)  SECRET_ARG="$2";   shift 2 ;;
-        --no-dpi)        DPI_FLAG="--no-dpi"; shift ;;
-        --fake-tls-only) FAKE_TLS_ONLY="true"; shift ;;
+        --no-dpi)  DPI_FLAG="--no-dpi"; shift ;;
+        --allow-dd) FAKE_TLS_ONLY="false"; shift ;;
         --help)    grep '^# ' "$0" | head -25; exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
