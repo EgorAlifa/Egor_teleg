@@ -29,13 +29,16 @@ PROXY_PORT=444
 FAKE_DOMAIN="wb.ru"
 SECRET_ARG=""
 DPI_FLAG=""
+FAKE_TLS_ONLY="false"
+CONFIG_FILE="/opt/mtproto-proxy/config.toml"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --port)    PROXY_PORT="$2";   shift 2 ;;
         --domain)  FAKE_DOMAIN="$2";  shift 2 ;;
         --secret)  SECRET_ARG="$2";   shift 2 ;;
-        --no-dpi)  DPI_FLAG="--no-dpi"; shift ;;
+        --no-dpi)        DPI_FLAG="--no-dpi"; shift ;;
+        --fake-tls-only) FAKE_TLS_ONLY="true"; shift ;;
         --help)    grep '^# ' "$0" | head -25; exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -177,6 +180,37 @@ info "Installing mtproto.zig proxy (port=${PROXY_PORT}, domain=${FAKE_DOMAIN}) .
 # shellcheck disable=SC2086
 mtbuddy install $INSTALL_ARGS
 
+# =============================================================================
+# FORCE domain + fake_tls_only into config (mtbuddy preserves existing config)
+# =============================================================================
+if [[ -f "$CONFIG_FILE" ]]; then
+    CURRENT_DOMAIN=$(grep -E '^\s*tls_domain\s*=' "$CONFIG_FILE" | head -1 \
+                     | sed 's/.*=\s*"\?\([^"]*\)"\?.*/\1/' | tr -d '"')
+    if [[ -n "$CURRENT_DOMAIN" && "$CURRENT_DOMAIN" != "$FAKE_DOMAIN" ]]; then
+        info "Updating tls_domain: '${CURRENT_DOMAIN}' → '${FAKE_DOMAIN}' ..."
+        sed -i "s/tls_domain = \"${CURRENT_DOMAIN}\"/tls_domain = \"${FAKE_DOMAIN}\"/" "$CONFIG_FILE"
+        ok "tls_domain updated. NOTE: existing proxy links are now invalid — share new links below."
+        CONFIG_CHANGED=1
+    fi
+
+    # Ensure [censorship] section exists
+    if ! grep -q '^\[censorship\]' "$CONFIG_FILE" 2>/dev/null; then
+        echo -e "\n[censorship]" >> "$CONFIG_FILE"
+    fi
+
+    # Set fake_tls_only
+    if grep -q '^\s*fake_tls_only\s*=' "$CONFIG_FILE" 2>/dev/null; then
+        sed -i "s/^\s*fake_tls_only\s*=.*/fake_tls_only = ${FAKE_TLS_ONLY}/" "$CONFIG_FILE"
+    else
+        sed -i '/^\[censorship\]/a fake_tls_only = '"${FAKE_TLS_ONLY}" "$CONFIG_FILE"
+    fi
+    ok "fake_tls_only = ${FAKE_TLS_ONLY}"
+
+    if [[ "${CONFIG_CHANGED:-0}" -eq 1 ]]; then
+        systemctl restart mtproto-proxy 2>/dev/null || true
+    fi
+fi
+
 # Fix nginx masking port if Xray owns 8443
 if [[ "$MASK_PORT" -ne 8443 ]]; then
     if grep -q '127\.0\.0\.1:8443' /etc/nginx/sites-available/mtproto-masking 2>/dev/null; then
@@ -200,7 +234,6 @@ ok "Service mtproto-proxy is running."
 # =============================================================================
 # READ SECRET FROM CONFIG
 # =============================================================================
-CONFIG_FILE="/opt/mtproto-proxy/config.toml"
 SECRET=""
 if [[ -f "$CONFIG_FILE" ]]; then
     SECRET=$(grep -E '^\s*secret\s*=' "$CONFIG_FILE" | head -1 \
