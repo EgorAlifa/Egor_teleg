@@ -207,8 +207,8 @@ if [[ -f "$CONFIG" ]]; then
     sed -i "s/^max_connections = .*/max_connections = ${MAX_CONN}/" "$CONFIG"
 
     # tcpmss = 536 — optimal fragmentation; breaks AI DPI reassembly (88 is too slow, 1024+ not enough)
-    grep -q '^tcpmss' "$CONFIG" || sed -i '/^\[censorship\]/a tcpmss = 536' "$CONFIG"
-    sed -i 's/^tcpmss = .*/tcpmss = 536/' "$CONFIG"
+    grep -q '^tcpmss' "$CONFIG" || sed -i '/^\[censorship\]/a tcpmss = 88' "$CONFIG"
+    sed -i 's/^tcpmss = .*/tcpmss = 88/' "$CONFIG"
 
     # use_middle_proxy = true  — route through Telegram relay servers instead of
     # direct DC connections; fixes DC4 (91.108.4.1) blocked from some VPS providers
