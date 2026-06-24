@@ -29,7 +29,7 @@ PROXY_PORT=444
 FAKE_DOMAIN="wb.ru"
 SECRET_ARG=""
 DPI_FLAG=""
-FAKE_TLS_ONLY="false"
+FAKE_TLS_ONLY="true"
 CONFIG_FILE="/opt/mtproto-proxy/config.toml"
 
 while [[ $# -gt 0 ]]; do
@@ -37,8 +37,8 @@ while [[ $# -gt 0 ]]; do
         --port)    PROXY_PORT="$2";   shift 2 ;;
         --domain)  FAKE_DOMAIN="$2";  shift 2 ;;
         --secret)  SECRET_ARG="$2";   shift 2 ;;
-        --no-dpi)        DPI_FLAG="--no-dpi"; shift ;;
-        --fake-tls-only) FAKE_TLS_ONLY="true"; shift ;;
+        --no-dpi)   DPI_FLAG="--no-dpi"; shift ;;
+        --allow-dd) FAKE_TLS_ONLY="false"; shift ;;
         --help)    grep '^# ' "$0" | head -25; exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -189,9 +189,19 @@ if [[ -f "$CONFIG_FILE" ]]; then
     if [[ -n "$CURRENT_DOMAIN" && "$CURRENT_DOMAIN" != "$FAKE_DOMAIN" ]]; then
         info "Updating tls_domain: '${CURRENT_DOMAIN}' → '${FAKE_DOMAIN}' ..."
         sed -i "s/tls_domain = \"${CURRENT_DOMAIN}\"/tls_domain = \"${FAKE_DOMAIN}\"/" "$CONFIG_FILE"
-        ok "tls_domain updated. NOTE: existing proxy links are now invalid — share new links below."
+        ok "tls_domain updated."
         CONFIG_CHANGED=1
     fi
+
+    # Rotate secret (generate new unless --secret was explicitly passed)
+    if [[ -n "$SECRET_ARG" ]]; then
+        NEW_SECRET="$SECRET_ARG"
+    else
+        NEW_SECRET=$(openssl rand -hex 16)
+    fi
+    sed -i "s/user = \"[0-9a-fA-F]\{32\}\"/user = \"${NEW_SECRET}\"/" "$CONFIG_FILE"
+    ok "Secret rotated: ${NEW_SECRET}"
+    CONFIG_CHANGED=1
 
     # Ensure [censorship] section exists
     if ! grep -q '^\[censorship\]' "$CONFIG_FILE" 2>/dev/null; then
