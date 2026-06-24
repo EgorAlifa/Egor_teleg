@@ -15,7 +15,7 @@
 #
 # Options:
 #   --port    <port>    Listen port        (default: 444)
-#   --domain  <domain>  Fake-TLS SNI       (default: vk.com — single-round x25519)
+#   --domain  <domain>  Fake-TLS SNI       (default: wb.ru)
 #   --secret  <secret>  Reuse 32-hex secret (default: generate new)
 #   --no-dpi            Skip TCPMSS/nfqws  (not recommended for Russia)
 #   --help              Show this help
@@ -26,7 +26,7 @@
 set -euo pipefail
 
 PROXY_PORT=444
-FAKE_DOMAIN="vk.com"
+FAKE_DOMAIN="wb.ru"
 SECRET_ARG=""
 DPI_FLAG=""
 
