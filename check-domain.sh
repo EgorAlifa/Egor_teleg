@@ -16,6 +16,8 @@
 #   ./check-domain.sh                      # check the built-in candidate list
 #   ./check-domain.sh drom.ru cian.ru      # check given domains
 #   ./check-domain.sh example.ru=1.2.3.4   # check one specific IP
+#
+# Exit code: 0 if at least one domain is suitable, 1 otherwise.
 # =============================================================================
 set -uo pipefail
 
@@ -118,4 +120,5 @@ if (( ${#GOOD[@]} )); then
     echo -e "\033[1;32mSuitable (every IP does TLS 1.3 + X25519MLKEM768):\033[0m ${GOOD[*]}"
 else
     echo -e "\033[1;31mNo suitable domain in this list.\033[0m"
+    exit 1
 fi
