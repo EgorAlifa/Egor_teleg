@@ -23,7 +23,8 @@
 #   --syn-limit         Kernel per-IP SYN limiter with TCP RST (54/min, burst 1)
 #                       against the June-2026 TSPU parallel-connect block.
 #                       Can throttle many users behind one carrier NAT IP.
-#   --secret  <secret>  Reuse 32-hex secret (default: generate new)
+#   --secret  <secret>  Reuse a secret: 32 hex, or the full ee... secret from
+#                       an old link (default: generate new)
 #   --no-dpi            Skip TCPMSS/nfqws  (not recommended for Russia)
 #   --max-conn <n>      Max client connections (default: auto, ~1/4 of RAM)
 #   --shared-vm         Low CPU/IO priority + RAM cap for the proxy, so it
@@ -70,6 +71,12 @@ die()   { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
 
 [[ "$(id -u)" -eq 0 ]] || die "Run as root: sudo ./deploy-mtproto.sh"
 command -v curl >/dev/null 2>&1 || die "curl is required."
+
+# Accept the bare 32-hex user secret or a full ee/dd secret copied from a link.
+if [[ -n "$SECRET_ARG" ]]; then
+    [[ "$SECRET_ARG" =~ ^(ee|dd)([0-9a-fA-F]{32}) ]] && SECRET_ARG="${BASH_REMATCH[2]}"
+    [[ "$SECRET_ARG" =~ ^[0-9a-fA-F]{32}$ ]] || die "--secret must be 32 hex chars or an ee.../dd... link secret."
+fi
 
 # =============================================================================
 # CHECK Fake-TLS domain: TLS 1.3 + X25519MLKEM768 on every IP (June-2026 TSPU)
@@ -308,13 +315,20 @@ ok "Service mtproto-proxy is running."
 
 # =============================================================================
 # READ SECRET FROM CONFIG
+# mtbuddy keeps it as `user = "<32 hex>"` under [access.users]. A Fake-TLS link
+# needs the full form: "ee" + that secret + hex(tls_domain).
 # =============================================================================
 SECRET=""
 if [[ -f "$CONFIG_FILE" ]]; then
-    SECRET=$(grep -E '^\s*secret\s*=' "$CONFIG_FILE" | head -1 \
-             | sed 's/.*=\s*"\?\([0-9a-fA-F]*\)"\?.*/\1/')
+    USER_SECRET=$(awk '/^\[/ {in_users = ($0 ~ /^\[access\.users\]/); next}
+                      in_users && match($0, /"[0-9a-fA-F]{32}"/) {print substr($0, RSTART+1, 32); exit}' "$CONFIG_FILE")
+    LINK_DOMAIN=$(sed -n 's/^\s*tls_domain\s*=\s*"\([^"]*\)".*/\1/p' "$CONFIG_FILE" | head -1)
+    LINK_DOMAIN="${LINK_DOMAIN:-$FAKE_DOMAIN}"
+    if [[ -n "$USER_SECRET" ]]; then
+        SECRET="ee${USER_SECRET}$(printf '%s' "$LINK_DOMAIN" | od -An -tx1 | tr -d ' \n')"
+    fi
 fi
-[[ -z "$SECRET" ]] && warn "Could not read secret from config — check ${CONFIG_FILE}"
+[[ -z "$SECRET" ]] && warn "Could not read secret from config — run: mtbuddy links"
 
 HOST_IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null \
        || curl -s --max-time 5 https://api.ipify.org 2>/dev/null \
