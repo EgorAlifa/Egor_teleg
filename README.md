@@ -16,6 +16,7 @@ Both scripts auto-detect open firewall ports and cap resource use at **≤ 50 % 
 | File | Purpose |
 |------|---------|
 | `deploy-mtproto.sh` | **High-load MTProto proxy** using mtg v2 (recommended) |
+| `check-domain.sh` | Checks candidate Fake-TLS domains for TLS 1.3 + X25519MLKEM768 (June-2026 TSPU marker) |
 | `deploy.sh` | SOCKS5 proxy using Dante |
 | `Dockerfile` | Dante image (used by `deploy.sh`) |
 | `dante.conf` | Dante configuration |
