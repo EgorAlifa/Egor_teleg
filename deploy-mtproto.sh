@@ -5,7 +5,7 @@
 # WHY mtproto.zig instead of mtg?
 #   Since April 2026 Russia's TSPU does MITM TCP injection breaking all
 #   standard MTProto proxies. mtproto.zig v0.23+ defeats this via:
-#     • Fake TLS 1.3 handshake disguised as wb.ru traffic
+#     • Fake TLS 1.3 handshake disguised as traffic to a real Russian site
 #     • TCPMSS=536 fragmentation so DPI never sees a full signature
 #     • nfqws fake-packet desync injected on every packet
 #   mtg v2 has none of these — it is dead in Russia.
@@ -14,9 +14,17 @@
 #   ./deploy-mtproto.sh [OPTIONS]
 #
 # Options:
-#   --port    <port>    Listen port        (default: 444)
-#   --domain  <domain>  Fake-TLS SNI       (default: wb.ru)
-#   --secret  <secret>  Reuse 32-hex secret (default: generate new)
+#   --port    <port>    Listen port        (default: 443)
+#   --domain  <domain>  Fake-TLS SNI       (default: sravni.ru; fallback: itmo.ru)
+#                       Must do TLS 1.3 + X25519MLKEM768 on every IP (checked
+#                       with check-domain.sh) — since June 2026 the TSPU blocks
+#                       iOS clients + their whole NAT when the domain lacks PQ
+#   --skip-domain-check Deploy without the PQ domain check
+#   --syn-limit         Kernel per-IP SYN limiter with TCP RST (54/min, burst 1)
+#                       against the June-2026 TSPU parallel-connect block.
+#                       Can throttle many users behind one carrier NAT IP.
+#   --secret  <secret>  Reuse a secret: 32 hex, or the full ee... secret from
+#                       an old link (default: generate new)
 #   --no-dpi            Skip TCPMSS/nfqws  (not recommended for Russia)
 #   --max-conn <n>      Max client connections (default: auto, ~1/4 of RAM)
 #   --shared-vm         Low CPU/IO priority + RAM cap for the proxy, so it
@@ -29,7 +37,9 @@
 set -euo pipefail
 
 PROXY_PORT=443
-FAKE_DOMAIN="vk.com"
+FAKE_DOMAIN="sravni.ru"
+DOMAIN_CHECK="true"
+SYN_LIMIT="false"
 SECRET_ARG=""
 DPI_FLAG=""
 FAKE_TLS_ONLY="true"
@@ -40,18 +50,16 @@ CONFIG_FILE="/opt/mtproto-proxy/config.toml"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --port)    PROXY_PORT="$2";   shift 2 ;;
-        --domain)  FAKE_DOMAIN="$2";  shift 2
-                   # wb.ru / mail.ru / ya.ru use HRR+secp521r1 — proxy breaks
-                   [[ "$FAKE_DOMAIN" =~ ^(wb\.ru|mail\.ru|ya\.ru)$ ]] && \
-                       die "Domain '${FAKE_DOMAIN}' uses HRR/secp521r1 — incompatible with FakeTLS. Use vk.com, rutube.ru, ozon.ru, yandex.ru, or dzen.ru instead." ;;
-
+        --domain)  FAKE_DOMAIN="$2";  shift 2 ;;
+        --skip-domain-check) DOMAIN_CHECK="false"; shift ;;
+        --syn-limit) SYN_LIMIT="true"; shift ;;
         --secret)  SECRET_ARG="$2";   shift 2 ;;
         --no-dpi)  DPI_FLAG="--no-dpi"; shift ;;
         --allow-dd) FAKE_TLS_ONLY="false"; shift ;;
         --max-conn)  MAX_CONN="$2"; shift 2
                      [[ "$MAX_CONN" =~ ^[0-9]+$ ]] || { echo "--max-conn needs a number"; exit 1; } ;;
         --shared-vm) SHARED_VM="true"; shift ;;
-        --help)    grep '^# ' "$0" | head -28; exit 0 ;;
+        --help)    sed -n '/^# Usage:/,/^# =====/p' "$0" | sed '$d'; exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -63,6 +71,23 @@ die()   { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
 
 [[ "$(id -u)" -eq 0 ]] || die "Run as root: sudo ./deploy-mtproto.sh"
 command -v curl >/dev/null 2>&1 || die "curl is required."
+
+# Accept the bare 32-hex user secret or a full ee/dd secret copied from a link.
+if [[ -n "$SECRET_ARG" ]]; then
+    [[ "$SECRET_ARG" =~ ^(ee|dd)([0-9a-fA-F]{32}) ]] && SECRET_ARG="${BASH_REMATCH[2]}"
+    [[ "$SECRET_ARG" =~ ^[0-9a-fA-F]{32}$ ]] || die "--secret must be 32 hex chars or an ee.../dd... link secret."
+fi
+
+# =============================================================================
+# CHECK Fake-TLS domain: TLS 1.3 + X25519MLKEM768 on every IP (June-2026 TSPU)
+# =============================================================================
+if [[ "$DOMAIN_CHECK" == "true" ]]; then
+    CHECKER="$(dirname "$(readlink -f "$0")")/check-domain.sh"
+    [[ -f "$CHECKER" ]] || die "check-domain.sh not found next to this script (or pass --skip-domain-check)."
+    info "Checking Fake-TLS domain '${FAKE_DOMAIN}' for post-quantum TLS ..."
+    bash "$CHECKER" "$FAKE_DOMAIN" || die "Domain '${FAKE_DOMAIN}' fails the PQ check — TSPU would block iOS clients. Pick another (./check-domain.sh lists candidates) or pass --skip-domain-check."
+    ok "Domain '${FAKE_DOMAIN}' does TLS 1.3 + X25519MLKEM768."
+fi
 
 # =============================================================================
 # INSTALL build dependencies (gcc, nfqueue libs needed for nfqws)
@@ -247,6 +272,16 @@ if [[ "$MASK_PORT" -ne 8443 ]]; then
 fi
 
 # =============================================================================
+# SYN LIMIT: RST over-limit SYNs so clients retry fast (June-2026 TSPU block)
+# =============================================================================
+if [[ "$SYN_LIMIT" == "true" ]]; then
+    info "Enabling per-IP SYN limiter (REJECT, 54/minute, burst 1) ..."
+    mtbuddy setup syn-limit --reject --rate 54/minute --burst 1 \
+        && ok "SYN limiter enabled. Undo: mtbuddy setup syn-limit --remove" \
+        || warn "mtbuddy setup syn-limit failed — continuing without it."
+fi
+
+# =============================================================================
 # SHARED VM: lower proxy priority so co-located services keep working
 # =============================================================================
 if [[ "$SHARED_VM" == "true" ]]; then
@@ -280,13 +315,20 @@ ok "Service mtproto-proxy is running."
 
 # =============================================================================
 # READ SECRET FROM CONFIG
+# mtbuddy keeps it as `user = "<32 hex>"` under [access.users]. A Fake-TLS link
+# needs the full form: "ee" + that secret + hex(tls_domain).
 # =============================================================================
 SECRET=""
 if [[ -f "$CONFIG_FILE" ]]; then
-    SECRET=$(grep -E '^\s*secret\s*=' "$CONFIG_FILE" | head -1 \
-             | sed 's/.*=\s*"\?\([0-9a-fA-F]*\)"\?.*/\1/')
+    USER_SECRET=$(awk '/^\[/ {in_users = ($0 ~ /^\[access\.users\]/); next}
+                      in_users && match($0, /"[0-9a-fA-F]{32}"/) {print substr($0, RSTART+1, 32); exit}' "$CONFIG_FILE")
+    LINK_DOMAIN=$(sed -n 's/^\s*tls_domain\s*=\s*"\([^"]*\)".*/\1/p' "$CONFIG_FILE" | head -1)
+    LINK_DOMAIN="${LINK_DOMAIN:-$FAKE_DOMAIN}"
+    if [[ -n "$USER_SECRET" ]]; then
+        SECRET="ee${USER_SECRET}$(printf '%s' "$LINK_DOMAIN" | od -An -tx1 | tr -d ' \n')"
+    fi
 fi
-[[ -z "$SECRET" ]] && warn "Could not read secret from config — check ${CONFIG_FILE}"
+[[ -z "$SECRET" ]] && warn "Could not read secret from config — run: mtbuddy links"
 
 HOST_IP=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null \
        || curl -s --max-time 5 https://api.ipify.org 2>/dev/null \

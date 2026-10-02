@@ -16,6 +16,7 @@ Both scripts auto-detect open firewall ports and cap resource use at **≤ 50 % 
 | File | Purpose |
 |------|---------|
 | `deploy-mtproto.sh` | **High-load MTProto proxy** using mtg v2 (recommended) |
+| `check-domain.sh` | Checks candidate Fake-TLS domains for TLS 1.3 + X25519MLKEM768 (June-2026 TSPU marker) |
 | `deploy.sh` | SOCKS5 proxy using Dante |
 | `Dockerfile` | Dante image (used by `deploy.sh`) |
 | `dante.conf` | Dante configuration |
@@ -42,11 +43,28 @@ LINK   : https://t.me/proxy?server=185.113.223.34&port=8080&secret=ee...
 
 Options:
 ```bash
-./deploy-mtproto.sh --port 8080 --domain www.cloudflare.com
+./deploy-mtproto.sh --domain itmo.ru                 # fallback Fake-TLS domain
+./deploy-mtproto.sh --syn-limit                     # RST over-limit SYNs (June-2026 TSPU block)
 ./deploy-mtproto.sh --secret ee<existing-secret>   # reuse saved secret
 ./deploy-mtproto.sh --max-conn 512                 # override auto-sized connection limit
 ./deploy-mtproto.sh --shared-vm                    # VM shared with other services
 ```
+
+### Choosing the Fake-TLS domain
+
+Since June 2026 the TSPU blocks iOS clients (and everyone behind their carrier NAT)
+when the Fake-TLS domain does not negotiate post-quantum TLS (X25519MLKEM768).
+The default `sravni.ru` and the fallback `itmo.ru` pass on every IP (checked
+October 2026). The deploy refuses a domain that fails `check-domain.sh`:
+
+```bash
+sudo ./check-domain.sh                  # check the built-in candidate list
+sudo ./check-domain.sh example.ru       # check your own candidate
+```
+
+Also check a candidate with `@Sni_checker_bot` in Telegram: it flags domains that are
+too popular (e.g. `ozon.ru`). Treat its "PQ OK" on a TLSv1.2 answer as a failure.
+Changing the domain invalidates all share links.
 
 ### Running on a small shared VM (e.g. 1 vCPU / 1 GB)
 

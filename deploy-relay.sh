@@ -2,7 +2,8 @@
 # =============================================================================
 # deploy-relay.sh — TCP relay: forwards port 444 to the real proxy server.
 #
-# Run this on the RELAY server (clean European VPS).
+# Run this on the RELAY server, e.g. a Russian VPS (Yandex Cloud, VK Cloud,
+# Selectel) when mobile networks only let through whitelisted Russian IPs.
 # The MTProto proxy stays on the original server.
 #
 # Usage:
@@ -10,12 +11,12 @@
 #
 # Options:
 #   --target <ip>    IP of the real MTProto proxy server (REQUIRED)
-#   --port   <port>  Port to relay (default: 444)
+#   --port   <port>  Port to relay (default: 443, same as deploy-mtproto.sh)
 # =============================================================================
 set -euo pipefail
 
 TARGET_IP=""
-RELAY_PORT=444
+RELAY_PORT=443
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
