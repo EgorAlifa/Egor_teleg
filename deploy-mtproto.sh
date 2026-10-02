@@ -15,7 +15,7 @@
 #
 # Options:
 #   --port    <port>    Listen port        (default: 443)
-#   --domain  <domain>  Fake-TLS SNI       (default: itmo.ru; fallback: sravni.ru)
+#   --domain  <domain>  Fake-TLS SNI       (default: sravni.ru; fallback: itmo.ru)
 #                       Must do TLS 1.3 + X25519MLKEM768 on every IP (checked
 #                       with check-domain.sh) — since June 2026 the TSPU blocks
 #                       iOS clients + their whole NAT when the domain lacks PQ
@@ -36,7 +36,7 @@
 set -euo pipefail
 
 PROXY_PORT=443
-FAKE_DOMAIN="itmo.ru"
+FAKE_DOMAIN="sravni.ru"
 DOMAIN_CHECK="true"
 SYN_LIMIT="false"
 SECRET_ARG=""
