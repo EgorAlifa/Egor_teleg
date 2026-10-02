@@ -90,6 +90,40 @@ if [[ "$DOMAIN_CHECK" == "true" ]]; then
 fi
 
 # =============================================================================
+# EXISTING CONFIG with another domain/port: back it up so mtbuddy installs fresh.
+# mtbuddy keeps an existing config to preserve issued links and refuses an
+# install whose --domain/--port differ (ConfigIdentityConflict) — which would
+# leave the proxy stopped. Links change anyway, so start from a clean config.
+# =============================================================================
+if [[ -f "$CONFIG_FILE" ]]; then
+    OLD_DOMAIN=$(awk -F'"' '/^\[/ {sec=$0; next} sec=="[censorship]" && /^[ \t]*tls_domain[ \t]*=/ {print $2; exit}' "$CONFIG_FILE")
+    OLD_PORT=$(awk -F'=' '/^\[/ {sec=$0; next} sec=="[server]" && /^[ \t]*port[ \t]*=/ {gsub(/[ \t"]/, "", $2); print $2; exit}' "$CONFIG_FILE")
+    if [[ ( -n "$OLD_DOMAIN" && "$OLD_DOMAIN" != "$FAKE_DOMAIN" ) || ( -n "$OLD_PORT" && "$OLD_PORT" != "$PROXY_PORT" ) ]]; then
+        BACKUP="${CONFIG_FILE}.bak-${OLD_DOMAIN:-unknown}-${OLD_PORT:-unknown}-$(date +%Y%m%d-%H%M%S)"
+        warn "Existing config uses ${OLD_DOMAIN:-?}:${OLD_PORT:-?}, requested ${FAKE_DOMAIN}:${PROXY_PORT} — old links will stop working."
+        mv "$CONFIG_FILE" "$BACKUP"
+        ok "Old config saved to ${BACKUP}"
+        OLD_SECRET=$(awk '/^\[/ {u = ($0 ~ /^\[access\.users\]/); next}
+                          u && match($0, /"[0-9a-fA-F]{32}"/) {print substr($0, RSTART+1, 32); exit}' "$BACKUP")
+        info "To roll back to the old links: mv ${BACKUP} ${CONFIG_FILE} && $0 --domain ${OLD_DOMAIN:-<old>} --port ${OLD_PORT:-<old>} --skip-domain-check${OLD_SECRET:+ --secret ${OLD_SECRET}}"
+
+        # Drop TCPMSS/NFQUEUE rules mtbuddy added for the old port
+        if [[ -n "$OLD_PORT" && "$OLD_PORT" != "$PROXY_PORT" ]]; then
+            for ipt in iptables ip6tables; do
+                command -v "$ipt" >/dev/null 2>&1 || continue
+                "$ipt" -t mangle -S 2>/dev/null \
+                    | grep -E -- "--sport ${OLD_PORT}( |$)" | grep -E -- "-j (TCPMSS|NFQUEUE)" \
+                    | sed 's/^-A /-D /' \
+                    | while read -r rule; do
+                        # shellcheck disable=SC2086
+                        "$ipt" -t mangle $rule 2>/dev/null && info "Removed ${ipt} rule: ${rule#-D }"
+                    done
+            done
+        fi
+    fi
+fi
+
+# =============================================================================
 # INSTALL build dependencies (gcc, nfqueue libs needed for nfqws)
 # =============================================================================
 info "Installing build dependencies ..."
