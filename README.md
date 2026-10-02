@@ -44,7 +44,23 @@ Options:
 ```bash
 ./deploy-mtproto.sh --port 8080 --domain www.cloudflare.com
 ./deploy-mtproto.sh --secret ee<existing-secret>   # reuse saved secret
+./deploy-mtproto.sh --max-conn 512                 # override auto-sized connection limit
+./deploy-mtproto.sh --shared-vm                    # VM shared with other services
 ```
+
+### Running on a small shared VM (e.g. 1 vCPU / 1 GB)
+
+`--shared-vm` adds systemd drop-ins (`/etc/systemd/system/mtproto-proxy.service.d/shared-vm.conf`)
+so the proxy never starves other services on the same machine:
+
+| Setting | Value |
+|---------|-------|
+| `CPUWeight` / `IOWeight` | 50 (half the default priority) |
+| `MemoryMax` | 1/4 of RAM (min 128 MB) |
+| `OOMScoreAdjust` | 500 (proxy is killed before other services) |
+
+The auto-sized connection limit is also budgeted on 1/4 of RAM (min 256).
+To undo: `rm -r /etc/systemd/system/mtproto-proxy.service.d && systemctl daemon-reload && systemctl restart mtproto-proxy`.
 
 ---
 

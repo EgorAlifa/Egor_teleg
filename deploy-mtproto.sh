@@ -18,6 +18,9 @@
 #   --domain  <domain>  Fake-TLS SNI       (default: wb.ru)
 #   --secret  <secret>  Reuse 32-hex secret (default: generate new)
 #   --no-dpi            Skip TCPMSS/nfqws  (not recommended for Russia)
+#   --max-conn <n>      Max client connections (default: auto, ~1/4 of RAM)
+#   --shared-vm         Low CPU/IO priority + RAM cap for the proxy, so it
+#                       never starves other services on the same VM
 #   --help              Show this help
 #
 # Installs mtbuddy to /usr/local/bin and the proxy to /opt/mtproto-proxy.
@@ -30,6 +33,8 @@ FAKE_DOMAIN="vk.com"
 SECRET_ARG=""
 DPI_FLAG=""
 FAKE_TLS_ONLY="true"
+MAX_CONN=""
+SHARED_VM="false"
 CONFIG_FILE="/opt/mtproto-proxy/config.toml"
 
 while [[ $# -gt 0 ]]; do
@@ -43,7 +48,10 @@ while [[ $# -gt 0 ]]; do
         --secret)  SECRET_ARG="$2";   shift 2 ;;
         --no-dpi)  DPI_FLAG="--no-dpi"; shift ;;
         --allow-dd) FAKE_TLS_ONLY="false"; shift ;;
-        --help)    grep '^# ' "$0" | head -25; exit 0 ;;
+        --max-conn)  MAX_CONN="$2"; shift 2
+                     [[ "$MAX_CONN" =~ ^[0-9]+$ ]] || { echo "--max-conn needs a number"; exit 1; } ;;
+        --shared-vm) SHARED_VM="true"; shift ;;
+        --help)    grep '^# ' "$0" | head -28; exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -169,12 +177,15 @@ fi
 # =============================================================================
 # INSTALL / RECONFIGURE proxy
 # =============================================================================
-# Auto-size max connections: 90% of theoretical max (1024 per 256MB RAM)
-TOTAL_MEM_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
-MAX_CONN=$(( TOTAL_MEM_MB * 1024 / 256 * 90 / 100 ))
-[[ $MAX_CONN -lt 512  ]] && MAX_CONN=512
-[[ $MAX_CONN -gt 65535 ]] && MAX_CONN=65535
-info "Max connections: ${MAX_CONN} (90% of RAM capacity)"
+# Auto-size max connections: 1024 per 256MB, budgeted on 1/4 of RAM so the
+# proxy leaves room for the OS and any other services on the VM.
+if [[ -z "$MAX_CONN" ]]; then
+    TOTAL_MEM_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
+    MAX_CONN=$(( TOTAL_MEM_MB / 4 * 1024 / 256 ))
+    [[ $MAX_CONN -lt 256  ]] && MAX_CONN=256
+    [[ $MAX_CONN -gt 65535 ]] && MAX_CONN=65535
+fi
+info "Max connections: ${MAX_CONN}"
 
 INSTALL_ARGS="--port ${PROXY_PORT} --domain ${FAKE_DOMAIN} --yes --max-connections ${MAX_CONN}"
 [[ -n "$SECRET_ARG"  ]] && INSTALL_ARGS+=" --secret ${SECRET_ARG}"
@@ -235,6 +246,28 @@ if [[ "$MASK_PORT" -ne 8443 ]]; then
     fi
 fi
 
+# =============================================================================
+# SHARED VM: lower proxy priority so co-located services keep working
+# =============================================================================
+if [[ "$SHARED_VM" == "true" ]]; then
+    TOTAL_MEM_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
+    PROXY_MEM_MAX=$(( TOTAL_MEM_MB / 4 ))
+    [[ $PROXY_MEM_MAX -lt 128 ]] && PROXY_MEM_MAX=128
+    for svc in mtproto-proxy nfqws-mtproto; do
+        mkdir -p "/etc/systemd/system/${svc}.service.d"
+        {
+            echo "[Service]"
+            echo "CPUWeight=50"
+            echo "IOWeight=50"
+            echo "OOMScoreAdjust=500"
+            if [[ "$svc" == "mtproto-proxy" ]]; then echo "MemoryMax=${PROXY_MEM_MAX}M"; fi
+        } > "/etc/systemd/system/${svc}.service.d/shared-vm.conf"
+    done
+    systemctl daemon-reload
+    systemctl restart mtproto-proxy 2>/dev/null || true
+    systemctl try-restart nfqws-mtproto 2>/dev/null || true
+    ok "Shared-VM limits: CPUWeight=50, MemoryMax=${PROXY_MEM_MAX}M for mtproto-proxy."
+fi
 
 # =============================================================================
 # VERIFY SERVICE
