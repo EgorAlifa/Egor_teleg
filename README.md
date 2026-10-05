@@ -66,6 +66,37 @@ Also check a candidate with `@Sni_checker_bot` in Telegram: it flags domains tha
 too popular (e.g. `ozon.ru`). Treat its "PQ OK" on a TLSv1.2 answer as a failure.
 Changing the domain invalidates all share links.
 
+### When a borrowed domain is blocked: `--own-domain`
+
+Some ISPs (confirmed in October 2026 on a Moscow ISP, while Rostelecom still let
+it through) check whether the SNI belongs to the server's IP. The client's
+first ~1.4 KB arrives, then every later packet of the flow is dropped, so the
+handshake never finishes (`handshake_timeout` grows, `users{…}` does not).
+Port, TCPMSS and a tiny TCP window (`--wsize`) did not help; a name that really
+resolves to the proxy did:
+
+```bash
+sudo ./deploy-mtproto.sh --own-domain --le-email you@example.com
+# or with your own domain (A record -> this server):
+sudo ./deploy-mtproto.sh --own-domain proxy.example.ru --le-email you@example.com
+```
+
+Without a name it uses `<ip-with-dashes>.sslip.io` (free wildcard DNS). The
+masking nginx gets a Let's Encrypt certificate (port 80 must be free once for the
+HTTP challenge; certbot renews it) and must negotiate X25519MLKEM768 — that needs
+OpenSSL 3.5+ (Ubuntu 26.04 has it). A `*.sslip.io` name is easy for a censor to
+block as a whole, so your own domain is the sturdier choice. Links change.
+
+How to tell this case apart, while the user retries:
+
+```bash
+sudo journalctl -u mtproto-proxy -f -o cat | grep --line-buffered "conn stats"
+sudo tcpdump -nn -i any 'host <user-ip> and port 443 and tcp[tcpflags] & tcp-fin == 0'
+```
+
+Note: iPhones and Macs never send TCP segments smaller than 216 bytes, so the
+TCPMSS clamp (88) does not fragment their ClientHello finely.
+
 ### Running on a small shared VM (e.g. 1 vCPU / 1 GB)
 
 `--shared-vm` adds systemd drop-ins (`/etc/systemd/system/mtproto-proxy.service.d/shared-vm.conf`)

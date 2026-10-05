@@ -20,6 +20,12 @@
 #                       with check-domain.sh) — since June 2026 the TSPU blocks
 #                       iOS clients + their whole NAT when the domain lacks PQ
 #   --skip-domain-check Deploy without the PQ domain check
+#   --own-domain [name] Use a name that resolves to THIS server as the Fake-TLS
+#                       domain (default: <ip-with-dashes>.sslip.io) and put a
+#                       Let's Encrypt cert on the masking nginx. Defeats ISPs
+#                       that drop flows whose SNI belongs to another site.
+#                       Needs port 80 free once for the ACME HTTP challenge.
+#   --le-email <email>  Let's Encrypt expiry notices (with --own-domain)
 #   --syn-limit         Kernel per-IP SYN limiter with TCP RST (54/min, burst 1)
 #                       against the June-2026 TSPU parallel-connect block.
 #                       Can throttle many users behind one carrier NAT IP.
@@ -40,6 +46,8 @@ PROXY_PORT=443
 FAKE_DOMAIN="sravni.ru"
 DOMAIN_CHECK="true"
 SYN_LIMIT="false"
+OWN_DOMAIN=""
+LE_EMAIL=""
 SECRET_ARG=""
 DPI_FLAG=""
 FAKE_TLS_ONLY="true"
@@ -53,6 +61,10 @@ while [[ $# -gt 0 ]]; do
         --domain)  FAKE_DOMAIN="$2";  shift 2 ;;
         --skip-domain-check) DOMAIN_CHECK="false"; shift ;;
         --syn-limit) SYN_LIMIT="true"; shift ;;
+        --own-domain) OWN_DOMAIN="auto"
+                     if [[ -n "${2:-}" && "$2" != --* ]]; then OWN_DOMAIN="$2"; shift; fi
+                     shift ;;
+        --le-email)  LE_EMAIL="$2"; shift 2 ;;
         --secret)  SECRET_ARG="$2";   shift 2 ;;
         --no-dpi)  DPI_FLAG="--no-dpi"; shift ;;
         --allow-dd) FAKE_TLS_ONLY="false"; shift ;;
@@ -76,6 +88,28 @@ command -v curl >/dev/null 2>&1 || die "curl is required."
 if [[ -n "$SECRET_ARG" ]]; then
     [[ "$SECRET_ARG" =~ ^(ee|dd)([0-9a-fA-F]{32}) ]] && SECRET_ARG="${BASH_REMATCH[2]}"
     [[ "$SECRET_ARG" =~ ^[0-9a-fA-F]{32}$ ]] || die "--secret must be 32 hex chars or an ee.../dd... link secret."
+fi
+
+# =============================================================================
+# OWN DOMAIN: the SNI must resolve to this server. Some ISPs (seen Oct 2026)
+# drop a flow after its first ~1.4 KB when the SNI names a site hosted
+# elsewhere; a name that really points here passes. The PQ check below would
+# probe the old proxy on :443, so it is replaced by a check of our own nginx
+# after install.
+# =============================================================================
+if [[ -n "$OWN_DOMAIN" ]]; then
+    PUBLIC_IP=$(curl -4 -s --max-time 5 https://ifconfig.me 2>/dev/null \
+             || curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
+    [[ "$PUBLIC_IP" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die "Could not detect this server's public IPv4."
+    if [[ "$OWN_DOMAIN" == "auto" ]]; then
+        FAKE_DOMAIN="${PUBLIC_IP//./-}.sslip.io"
+    else
+        FAKE_DOMAIN="$OWN_DOMAIN"
+    fi
+    getent ahostsv4 "$FAKE_DOMAIN" | awk '{print $1}' | grep -qxF "$PUBLIC_IP" \
+        || die "'${FAKE_DOMAIN}' does not resolve to ${PUBLIC_IP}. Point its A record here first."
+    ok "Own domain '${FAKE_DOMAIN}' resolves to ${PUBLIC_IP}."
+    DOMAIN_CHECK="false"
 fi
 
 # =============================================================================
@@ -302,6 +336,48 @@ if [[ "$MASK_PORT" -ne 8443 ]]; then
         sed -i "s/mask_port = 8443/mask_port = ${MASK_PORT}/" /opt/mtproto-proxy/config.toml 2>/dev/null || true
         systemctl restart nginx 2>/dev/null || true
         ok "nginx masking port changed to ${MASK_PORT}."
+    fi
+fi
+
+# =============================================================================
+# OWN DOMAIN: Let's Encrypt cert on the masking nginx + PQ self-check.
+# mtbuddy keeps existing /etc/nginx/ssl/{cert,key}.pem, so the links survive
+# `mtbuddy update`; certbot's timer renews and the hook reloads nginx.
+# =============================================================================
+if [[ -n "$OWN_DOMAIN" ]]; then
+    LIVE="/etc/letsencrypt/live/${FAKE_DOMAIN}"
+    if [[ ! -f "${LIVE}/fullchain.pem" ]]; then
+        command -v certbot >/dev/null 2>&1 || apt-get install -y --no-install-recommends certbot >/dev/null 2>&1 \
+            || warn "apt-get install certbot failed."
+        if ss -tln | grep -qE '[:.]80[[:space:]]'; then
+            warn "Port 80 is busy — cannot run the ACME HTTP challenge. Free it and re-run, or issue the cert yourself."
+        elif command -v certbot >/dev/null 2>&1; then
+            info "Requesting Let's Encrypt certificate for ${FAKE_DOMAIN} ..."
+            if [[ -n "$LE_EMAIL" ]]; then LE_ACCOUNT=(-m "$LE_EMAIL"); else LE_ACCOUNT=(--register-unsafely-without-email); fi
+            # certbot needs a readable working directory
+            (cd / && certbot certonly --standalone --preferred-challenges http -d "$FAKE_DOMAIN" \
+                --agree-tos -n "${LE_ACCOUNT[@]}" --deploy-hook "systemctl reload nginx") \
+                || warn "certbot failed — masking keeps its self-signed certificate."
+        fi
+    fi
+    if [[ -f "${LIVE}/fullchain.pem" ]]; then
+        [[ -L /etc/nginx/ssl/cert.pem || -e /etc/nginx/ssl.selfsigned-bak ]] \
+            || cp -a /etc/nginx/ssl /etc/nginx/ssl.selfsigned-bak
+        ln -sf "${LIVE}/fullchain.pem" /etc/nginx/ssl/cert.pem
+        ln -sf "${LIVE}/privkey.pem"   /etc/nginx/ssl/key.pem
+        if nginx -t >/dev/null 2>&1; then
+            systemctl reload nginx
+            ok "Masking nginx serves the Let's Encrypt certificate for ${FAKE_DOMAIN}."
+        else
+            warn "nginx -t failed with the new certificate — check: nginx -t"
+        fi
+    fi
+    NGINX_MASK_PORT=$(grep -oE '127\.0\.0\.1:[0-9]+' /etc/nginx/sites-available/mtproto-masking 2>/dev/null | head -1 | cut -d: -f2)
+    if echo | timeout 5 openssl s_client -connect "127.0.0.1:${NGINX_MASK_PORT:-8443}" -servername "$FAKE_DOMAIN" \
+            -tls1_3 -groups X25519MLKEM768 2>/dev/null | grep -q 'Negotiated TLS1.3 group: X25519MLKEM768'; then
+        ok "Masking nginx negotiates X25519MLKEM768."
+    else
+        warn "Masking nginx does not negotiate X25519MLKEM768 (needs OpenSSL 3.5+) — since June 2026 that marks iOS clients."
     fi
 fi
 
