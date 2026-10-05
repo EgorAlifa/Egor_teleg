@@ -87,6 +87,14 @@ HTTP challenge; certbot renews it) and must negotiate X25519MLKEM768 — that ne
 OpenSSL 3.5+ (Ubuntu 26.04 has it). A `*.sslip.io` name is easy for a censor to
 block as a whole, so your own domain is the sturdier choice. Links change.
 
+Probers without a secret see the masking nginx. Replace mtbuddy's
+"Down for maintenance" placeholder with the cover page from this repo
+(mtbuddy leaves operator content alone):
+
+```bash
+sudo cp masking/index.html /var/www/masking/index.html
+```
+
 How to tell this case apart, while the user retries:
 
 ```bash

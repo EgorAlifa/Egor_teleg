@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Northfield Works — web &amp; infrastructure</title>
+<meta name="description" content="Small studio for websites, hosting and server maintenance.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f5d50'/%3E%3Cpath d='M9 23V9h3l8 9.5V9h3v14h-3l-8-9.5V23z' fill='%23fff'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f7f6f2; --fg: #1d2421; --muted: #5d6762; --line: #dcdcd4;
+    --accent: #2f5d50; --card: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151917; --fg: #e8ebe9; --muted: #9aa49f; --line: #2b322f;
+            --accent: #7fb5a3; --card: #1b201e; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 64px 20px 48px; }
+  .logo {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-weight: 650; letter-spacing: .01em;
+  }
+  .mark {
+    width: 30px; height: 30px; border-radius: 7px; background: var(--accent);
+    color: var(--bg); display: grid; place-items: center; font-size: 15px; font-weight: 700;
+  }
+  h1 { font-size: clamp(28px, 5vw, 38px); line-height: 1.2; margin: 40px 0 12px; font-weight: 700; }
+  .lead { color: var(--muted); font-size: 18px; margin: 0 0 40px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); gap: 14px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px;
+  }
+  .card h2 { font-size: 16px; margin: 0 0 6px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+  .note {
+    margin-top: 36px; padding: 14px 16px; border-left: 3px solid var(--accent);
+    background: var(--card); border-radius: 0 8px 8px 0; color: var(--muted); font-size: 15px;
+  }
+  footer {
+    margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 14px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="logo"><span class="mark">N</span>Northfield Works</div>
+
+  <h1>Small websites and the servers behind them.</h1>
+  <p class="lead">A two-person studio building simple, fast sites for local businesses
+    and keeping their hosting patched, backed up and online.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Websites</h2>
+      <p>Static and lightweight sites: landing pages, menus, portfolios, booking pages.</p>
+    </div>
+    <div class="card">
+      <h2>Hosting</h2>
+      <p>Managed Linux servers in EU data centres, TLS certificates and DNS.</p>
+    </div>
+    <div class="card">
+      <h2>Maintenance</h2>
+      <p>Updates, monitoring, nightly backups and restores when something breaks.</p>
+    </div>
+  </div>
+
+  <p class="note">We are fully booked for the rest of the year and not taking new
+    projects until January. Existing clients: use the usual support channel.</p>
+
+  <footer>
+    <span>&copy; Northfield Works</span>
+    <span>Based in the Netherlands</span>
+  </footer>
+</main>
+</body>
+</html>
